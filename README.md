@@ -23,6 +23,8 @@ npm run status
 
 Start/Stop จากโฟลเดอร์อื่นได้ด้วย `bash /Users/kittipat/Project-Work/Consignment-System/scripts/start.sh` และ `stop.sh` ข้อมูลยังอยู่หลังหยุดระบบ ตัวหยุดตรวจตัว supervisor ของ Workspace นี้ ไม่สั่งปิดทุกโปรแกรมที่ใช้พอร์ต
 
+ถ้า `npm start` ขณะระบบเปิดอยู่แล้ว จะแจ้ง URL เดิมและจบคำสั่งโดยไม่เปิดบริการซ้ำ หากพอร์ตถูกโปรแกรมอื่นใช้จะแจ้ง Backend/Frontend และเลขพอร์ต โดยไม่ปิดโปรแกรมนั้นอัตโนมัติ
+
 หลังแก้โค้ด ให้ Stop → `npm run build` → Start
 
 ติดตั้งบนเครื่องใหม่: ใช้ Node.js 22+ และ Python 3.14 แล้วรัน `npm run setup` (ติดตั้ง dependency, สร้าง .env หากยังไม่มี และ Build) พัฒนาเฉพาะ Frontend ใช้ `npm --prefix frontend run dev` โดยเปิด Backend แยกด้วย `.venv/bin/python -m uvicorn backend.app:app --host 127.0.0.1 --port 8100 --reload` ปิด production server ก่อนใช้พอร์ตเดียวกัน
