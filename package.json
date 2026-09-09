@@ -1,0 +1,19 @@
+{
+  "name": "consignment-system",
+  "version": "0.2.0",
+  "private": true,
+  "scripts": {
+    "setup": "bash scripts/setup.sh",
+    "build": "npm --prefix frontend run build",
+    "start": "bash scripts/start.sh",
+    "stop": "bash scripts/stop.sh",
+    "status": ".venv/bin/python scripts/local.py status",
+    "test": ".venv/bin/python -m pytest -q tests",
+    "typecheck": "npm --prefix frontend run typecheck",
+    "test:e2e": "node frontend/node_modules/@playwright/test/cli.js test",
+    "audit": ".venv/bin/python scripts/audit-prices-costs.py",
+    "check": "npm run test && npm run typecheck && npm run build",
+    "docker:up": "bash scripts/docker.sh up",
+    "docker:down": "bash scripts/docker.sh down"
+  }
+}

@@ -1,0 +1,3 @@
+# Project-specific Codex defaults. Model routing stays with the active Wrixon profile.
+# Authentication, provider keys and personal approvals belong outside this repository.
+sandbox_mode = "workspace-write"

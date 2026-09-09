@@ -1,0 +1,12 @@
+import {cpSync, existsSync, mkdirSync} from 'node:fs';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+const frontend=path.join(root,'frontend');
+const dist=path.join(frontend,process.env.CONSIGN_NEXT_DIR||'.next');
+const standalone=path.join(dist,'standalone');
+if(!existsSync(path.join(standalone,'server.js')))throw new Error('Standalone server was not generated');
+mkdirSync(path.join(standalone,path.basename(dist)),{recursive:true});
+cpSync(path.join(dist,'static'),path.join(standalone,path.basename(dist),'static'),{recursive:true});
+if(existsSync(path.join(frontend,'public')))cpSync(path.join(frontend,'public'),path.join(standalone,'public'),{recursive:true});
+console.log('Standalone static assets prepared');
