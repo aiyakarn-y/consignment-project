@@ -60,6 +60,31 @@ class FakeBlob:
     def store(self):return BlobFileStore(token='vercel_blob_rw_TestStore_fixture',prefix='isolated-test',transport=httpx.MockTransport(self.handle))
 
 
+class EncodedBlob(FakeBlob):
+    """Delivery compression has a different validator from the stored object."""
+    def handle(self, request):
+        response = super().handle(request)
+        if request.url.host.endswith('.private.blob.vercel-storage.com') and response.status_code == 200:
+            if request.headers.get('accept-encoding') != 'identity':
+                return httpx.Response(200, headers={
+                    'etag': 'W/"compressed-representation"', 'content-encoding': 'gzip',
+                }, stream=httpx.ByteStream(gzip.compress(response.content)))
+        return response
+
+
+def test_blob_versioned_writes_use_original_representation():
+    fake = EncodedBlob()
+    store = fake.store()
+    first = JsonTransaction(store)
+    first.put('rules', 'A', '10%'); first.commit()
+    stale = JsonTransaction(store)
+    current = JsonTransaction(store)
+    current.put('rules', 'A', '20%'); current.commit()
+    assert JsonTransaction(store).get('rules', 'A') == '20%'
+    stale.put('rules', 'A', '30%')
+    with pytest.raises(WriteConflict): stale.commit()
+
+
 def test_blob_conditional_state_and_private_reads():
     fake=FakeBlob();store=fake.store()
     a=JsonTransaction(store);b=JsonTransaction(store)
@@ -72,8 +97,9 @@ def test_blob_conditional_state_and_private_reads():
     assert all(k.startswith('isolated-test/') for k in fake.objects)
 
 
-def test_blob_api_import_export_without_local_asset_paths(tmp_path,monkeypatch):
-    fake=FakeBlob()
+@pytest.mark.parametrize('blob_type', [FakeBlob, EncodedBlob])
+def test_blob_api_import_export_without_local_asset_paths(tmp_path,monkeypatch,blob_type):
+    fake=blob_type()
     monkeypatch.setattr(service,'STATE_DRIVER','json');monkeypatch.setattr(service,'STORAGE_DRIVER','vercel_blob')
     monkeypatch.setattr(service,'DATA',tmp_path)
     monkeypatch.setattr(service,'storage',fake.store)
@@ -87,10 +113,18 @@ def test_blob_api_import_export_without_local_asset_paths(tmp_path,monkeypatch):
         assert response.headers['X-Exported-Rows']=='1'
         assert response.json()['download'].startswith('/cloud-download?ticket=')
         assert len(c.get('/api/export-history').json())==1
+        assert c.delete('/api/history?confirm=true').status_code==200
+        assert len(c.get('/api/export-history').json())==0
         archive=c.post('/api/backups');assert archive.status_code==200,archive.text
         assert len(c.get('/api/backups').json())==1
         assert c.delete('/api/batches').status_code==200
         assert not any('/imports/' in k for k in fake.objects)
+        second = c.post('/api/batches', json={}).json()
+        second_url = '/api/batches/'+second['id']
+        assert upload(c,second_url,profile_id=cfg['id']).status_code==200
+        file_id = c.get(second_url).json()['files'][0]['id']
+        assert c.delete(second_url+'/files/'+file_id).status_code==200
+        assert c.get(second_url).json()['files']==[]
         assert not list(tmp_path.rglob('*.db'))
         assert not list(tmp_path.rglob('*.xlsx'))
 
