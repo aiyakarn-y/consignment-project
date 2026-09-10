@@ -174,19 +174,23 @@ def add_file(b,content,name,profile=None,allow_duplicate=False,check_history=Fal
                     raise HTTPException(413,'Excel หลังคลายข้อมูลใหญ่เกิน 150 MB')
         except zipfile.BadZipFile:
             raise HTTPException(400,'ไฟล์ไม่ใช่ Excel .xlsx ที่สมบูรณ์')
+    elif name.lower().endswith('.csv'):
+        from backend.csv_input import csv_workbook
+        try: csv_workbook(content).close()
+        except ValueError as ex: raise HTTPException(400,str(ex))
     elif not name.lower().endswith('.pdf') or not content.startswith(b'%PDF-'):
-        raise HTTPException(400,'รองรับ Excel .xlsx และ PDF เท่านั้น')
+        raise HTTPException(400,'รองรับ Excel .xlsx, CSV และ PDF เท่านั้น')
     storage().write(key, content)
     try:
         if profile:
-            if not name.lower().endswith('.xlsx'):raise ValueError('รูปแบบที่ตั้งค่าใช้กับ Excel เท่านั้น')
+            if not name.lower().endswith(('.xlsx','.csv')):raise ValueError('รูปแบบที่ตั้งค่าใช้กับ Excel หรือ CSV เท่านั้น')
             from backend.import_profiles import parse_profile
             rows,kind=parse_profile(content,name,profile['config'],sheets=sheets)
         else:
             with storage().materialize(key) as path: rows,kind=parse(path,name,sheets=sheets)
-        if name.lower().endswith('.xlsx'):
+        if name.lower().endswith(('.xlsx','.csv')):
             from backend.import_profiles import inspect_sheet_choices
-            info['sheet_review']=inspect_sheet_choices(content,profile['config'] if profile else None)
+            info['sheet_review']=inspect_sheet_choices(content,profile['config'] if profile else None,name=name)
             for item in info['sheet_review']:
                 members=[r for r in rows if r['sheet']==item['name']]
                 item.update(selected=bool(members),rows=len(members),gross=fmt(sum((dec(r.get('gross')) or Decimal(0) for r in members),Decimal(0))))

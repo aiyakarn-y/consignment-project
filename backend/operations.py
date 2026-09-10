@@ -64,14 +64,14 @@ def save_profile(payload:dict):
 
 @router.post('/profiles/inspect')
 def inspect(file:UploadFile,sheet:str=Form(''),header_row:int=Form(1)):
-    try:return inspect_workbook(file.file.read(25*1024*1024+1),sheet,header_row)
+    try:return inspect_workbook(file.file.read(25*1024*1024+1),sheet,header_row,name=file.filename or 'sample.xlsx')
     except Exception as ex:raise HTTPException(400,str(ex)[:1000])
 
 @router.post('/profiles/preview')
 def preview(file:UploadFile,config:str=Form(...)):
     try:
         content=file.file.read(25*1024*1024+1)
-        bound=bind_profile_headers(content,json.loads(config))
+        bound=bind_profile_headers(content,json.loads(config),name=file.filename or 'sample.xlsx')
         rows,kind=parse_profile(content,file.filename or 'preview.xlsx',bound)
     except Exception as ex:raise HTTPException(400,str(ex)[:1000])
     review_and_merge(rows)
@@ -106,12 +106,14 @@ def check_upload(batch_id:str,files:list[UploadFile],profile_id:str=Form('')):
     profile=get_profile(profile_id)['config'] if profile_id else None
     if len(files)>10:raise HTTPException(400,'สูงสุด 10 ไฟล์')
     for f in files:
+        if (f.filename or '').lower().endswith('.csv') and profile is None:
+            raise HTTPException(400,'CSV ต้องเลือกรูปแบบนำเข้า: สร้าง Mapping จากไฟล์ตัวอย่างและบันทึกรูปแบบก่อนนำเข้า')
         content=f.file.read(25*1024*1024+1)
         if len(content)>25*1024*1024:raise HTTPException(413,'ไฟล์ต้องไม่เกิน 25 MB')
         sha=digest(content)
         sheets=[]
-        if (f.filename or '').lower().endswith('.xlsx'):
-            try:sheets=inspect_sheet_choices(content,profile)
+        if (f.filename or '').lower().endswith(('.xlsx','.csv')):
+            try:sheets=inspect_sheet_choices(content,profile,name=f.filename or 'sample.xlsx')
             except ValueError as ex:raise HTTPException(400,str(ex))
         results.append(dict(sheets=sheets,name=f.filename,hash=sha,same_batch=any(x['hash']==sha for x in b['files']),previous=duplicate_matches(sha,batch_id)))
     return results

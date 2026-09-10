@@ -50,7 +50,10 @@ class ImportProfile(BaseModel):
         if self.end_row and self.end_row<=self.header_row:raise ValueError('แถวสุดท้ายต้องอยู่หลังหัวตาราง')
         return self
 
-def workbook(content):
+def workbook(content,name='sample.xlsx'):
+    if name.lower().endswith('.csv'):
+        from backend.csv_input import csv_workbook
+        return csv_workbook(content)
     if len(content)>25*1024*1024:raise ValueError('Excel ต้องไม่เกิน 25 MB')
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as z:
@@ -58,8 +61,8 @@ def workbook(content):
         return openpyxl.load_workbook(io.BytesIO(content),data_only=True,read_only=True)
     except (zipfile.BadZipFile,KeyError):raise ValueError('ไฟล์ Excel ไม่สมบูรณ์')
 
-def inspect_workbook(content,sheet='',header_row=1):
-    w=workbook(content)
+def inspect_workbook(content,sheet='',header_row=1,name='sample.xlsx'):
+    w=workbook(content,name)
     try:
         if not 1<=header_row<=1000:raise ValueError('หัวตารางต้องเป็นแถว 1–1000')
         if sheet and sheet not in w.sheetnames:raise ValueError('ไม่พบชีต')
@@ -86,9 +89,9 @@ def check_headers(sheet,cfg):
             raise ValueError(f'หัวคอลัมน์ชีต {sheet.title} ช่อง {column} เปลี่ยน: คาดว่า {expected} แต่พบ {actual or "(ว่าง)"} กรุณาตรวจ Mapping ใหม่')
 
 
-def bind_profile_headers(content,profile):
+def bind_profile_headers(content,profile,name='sample.xlsx'):
     cfg=ImportProfile.model_validate(profile)
-    w=workbook(content)
+    w=workbook(content,name)
     try:
         if cfg.sheet not in w.sheetnames:raise ValueError('ไม่พบชีตที่ตั้งค่า: '+cfg.sheet)
         cfg.expected_headers={c:header_text(w[cfg.sheet][f'{c}{cfg.header_row}'].value) for c in cfg.columns.values()}
@@ -97,9 +100,9 @@ def bind_profile_headers(content,profile):
     finally:w.close()
 
 
-def inspect_sheet_choices(content,profile=None):
+def inspect_sheet_choices(content,profile=None,name='sample.xlsx'):
     from backend.core import sheet_kind
-    w=workbook(content)
+    w=workbook(content,name)
     try:
         result=[]
         cfg=ImportProfile.model_validate(profile) if profile else None
@@ -115,7 +118,7 @@ def inspect_sheet_choices(content,profile=None):
 
 
 def parse_profile(content,name,profile,sheets=None):
-    cfg=ImportProfile.model_validate(profile);w=workbook(content)
+    cfg=ImportProfile.model_validate(profile);w=workbook(content,name)
     try:
         selected=[cfg.sheet] if sheets is None else sheets
         if not selected or len(selected)!=len(set(selected)) or any(name not in w.sheetnames for name in selected):raise ValueError('เลือกชีตที่มีอยู่จริงและไม่ซ้ำอย่างน้อยหนึ่งชีต')

@@ -18,7 +18,7 @@ export async function GET(request: Request) {
     const body = JSON.parse(Buffer.from(encoded, 'base64url').toString());
     if (!Number.isInteger(body.expires) || body.expires < Date.now() / 1000 || typeof body.key !== 'string' || !body.key.startsWith(prefix + '/')) throw new Error('Expired ticket');
     const key = body.key.slice(prefix.length + 1);
-    if (!/^(?:imports\/[0-9a-f]{32}\/[0-9a-f]{32}\.(?:xlsx|pdf)|exports\/[0-9a-f]{32}\.xlsx|backups\/[0-9a-zT_-]+\.zip|[0-9a-f]{32}\.(?:xlsx|pdf))$/.test(key)) throw new Error('Invalid path');
+    if (!/^(?:imports\/[0-9a-f]{32}\/[0-9a-f]{32}\.(?:xlsx|pdf|csv)|exports\/[0-9a-f]{32}\.xlsx|backups\/[0-9a-zT_-]+\.zip|[0-9a-f]{32}\.(?:xlsx|pdf|csv))$/.test(key)) throw new Error('Invalid path');
     const delegation = await issueSignedToken({ token: secret, pathname: body.key, operations: ['get'], validUntil: Date.now() + 5 * 60 * 1000 });
     const { presignedUrl } = await presignUrl(delegation, { operation: 'get', access: 'private', pathname: body.key });
     if (request.headers.get('x-consign-fetch') === '1') return Response.json({ url: presignedUrl }, { headers: { 'Cache-Control': 'no-store' } });
