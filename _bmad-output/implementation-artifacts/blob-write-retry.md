@@ -26,3 +26,16 @@ clear history, backup, file deletion and clear batches using an isolated test
 namespace. Test objects cleaned afterward. No production data changed or deploy
 performed. The live run did not inject a provider outage; fault recovery was
 verified using deterministic transport tests.
+
+## Expanded verification requested by user
+
+- Full Python suite before additional test-only cases: 142 passed.
+- Expanded Blob suite: 33 passed, adding new-object and existing-object outcomes
+  and API-level export faults for 429/500/502/503/504 before/after metadata commit.
+  Each successful recovery creates exactly one export file and history record;
+  downloaded XLSX content is readable and contains the expected SKU.
+- Live isolated Blob: read exported Excel bytes and verify exact template headers;
+  backup, preview, clear, restore, then compare restored export bytes exactly.
+- Scope limitation: these checks do not prove all provider failures impossible,
+  nor exercise browser signed downloads/large uploads on deployed Vercel. Backend
+  API tests use local FastAPI TestClient with actual private Blob storage.
