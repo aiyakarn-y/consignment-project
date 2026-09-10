@@ -1,4 +1,4 @@
-import hashlib,json
+import gzip,hashlib,json,zlib
 from urllib.parse import unquote
 import httpx
 import pytest
@@ -7,6 +7,23 @@ from backend import app as service
 from backend.blob_storage import BlobFileStore
 from backend.repository import JsonTransaction,WriteConflict,STATE_KEY
 from test_operations import profile,upload,excel
+
+
+@pytest.mark.parametrize('encoding,compress', [('gzip', gzip.compress), ('deflate', zlib.compress), ('identity', lambda data: data)])
+def test_blob_decodes_response_once_and_preserves_etag(encoding, compress):
+    payload = b'{"format":"consignment-json","version":1,"revision":0,"tables":{}}'
+    wire = compress(payload)
+    def handle(request):
+        return httpx.Response(200, headers={
+            'content-encoding': encoding, 'content-length': str(len(wire)),
+            'etag': '"original-version"', 'content-type': 'application/json',
+        }, stream=httpx.ByteStream(wire))
+    store = BlobFileStore(token='vercel_blob_rw_TestStore_fixture', prefix='test', transport=httpx.MockTransport(handle))
+    data, etag = store.read_version(STATE_KEY)
+    assert data == payload
+    assert etag == '"original-version"'
+    with pytest.raises(OSError, match='size limit'):
+        store.request('GET', 'https://vercel.com/api/blob', max_bytes=len(payload)-1)
 
 
 class FakeBlob:
