@@ -10,8 +10,13 @@ from starlette.responses import JSONResponse
 def install_beta_auth(app):
     @app.middleware('http')
     async def beta_auth(request, call_next):
-        if os.environ.get('CONSIGN_BETA_MODE') != '1' and os.environ.get('VERCEL') != '1':
-            return await call_next(request)
+        mode = os.environ.get('CONSIGN_BETA_MODE')
+        on_vercel = os.environ.get('VERCEL') == '1'
+        if mode == '0' or (mode != '1' and not on_vercel):
+            response = await call_next(request)
+            if on_vercel:
+                response.headers['Cache-Control'] = 'no-store'
+            return response
         password = os.environ.get('CONSIGN_BETA_PASSWORD', '')
         username = os.environ.get('CONSIGN_BETA_USER', 'beta')
         if not password:

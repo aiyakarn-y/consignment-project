@@ -33,6 +33,12 @@ Import repository ใน Vercel เลือก Framework Preset เป็น **
 เพื่อไม่ให้ Preview แก้ข้อมูล Production โดยไม่ได้ตั้งใจ ทุก preview ที่ใช้
 namespace เดียวกันจะเห็นข้อมูลชุดเดียวกัน
 
+หากต้องการปิดหน้าล็อกอินชั่วคราว ตั้ง `CONSIGN_BETA_MODE=0` ให้ทั้งสอง service
+ใน Environment ที่ใช้งาน แล้ว Redeploy ไม่จำเป็นต้องตั้ง Username/Password
+เมื่อปิด ผู้ที่เข้าถึงลิงก์จะอ่าน แก้ไข ล้างข้อมูล และใช้ Backup/Restore ได้
+เปิดกลับด้วย `CONSIGN_BETA_MODE=1` พร้อมตั้งรหัสผ่านแล้ว Redeploy
+หากไม่ได้กำหนดค่านี้ Vercel ยังต้องล็อกอินตามค่าเริ่มต้น
+
 อย่าใช้ชื่อ `NEXT_PUBLIC_` กับ token/รหัสผ่าน อย่า upload `.env` หรือข้อมูล
 `data/` เข้า repository และอย่าคัดลอก `CONSIGN_DATA_DIR` / template path /
 Backend localhost ของเครื่องคุณไป Vercel

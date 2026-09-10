@@ -1,7 +1,8 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 
 export function requireBetaAuth(request: Request): Response | null {
-  if (process.env.CONSIGN_BETA_MODE !== '1' && process.env.VERCEL !== '1') return null;
+  const mode = process.env.CONSIGN_BETA_MODE;
+  if (mode === '0' || (mode !== '1' && process.env.VERCEL !== '1')) return null;
   const password = process.env.CONSIGN_BETA_PASSWORD;
   if (!password) return new Response('Beta credentials are not configured', { status: 503 });
   const match = /^Basic ([A-Za-z0-9+/]+={0,2})$/i.exec(request.headers.get('authorization') || '');
