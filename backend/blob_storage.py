@@ -53,7 +53,12 @@ class BlobFileStore:
                         total += len(chunk)
                         if total > max_bytes: raise OSError('Blob exceeds configured size limit')
                         chunks.append(chunk)
-                    response=httpx.Response(streamed.status_code,headers=streamed.headers,content=b''.join(chunks))
+                    # iter_bytes() already decodes HTTP content encodings. Preserve
+                    # ETag for conditional writes, but discard encoded-body headers.
+                    decoded_headers = httpx.Headers(streamed.headers)
+                    for name in ('content-encoding', 'content-length', 'transfer-encoding'):
+                        decoded_headers.pop(name, None)
+                    response=httpx.Response(streamed.status_code,headers=decoded_headers,content=b''.join(chunks))
         except httpx.TransportError:
             raise OSError('Blob service connection failed') from None
         if response.status_code in (409, 412): raise WriteConflict('Blob version conflict')
