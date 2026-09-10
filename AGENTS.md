@@ -3,6 +3,7 @@
 Follow the user's current scope. Wrixon profile is codex-only unless explicitly changed. Before implementation/review state PATH A/B/C, concrete reason/evidence and model route. Use B for nuanced multi-file behavior and C for architecture/migration. For B/C bug fixes reproduce the failure before changing behavior. Record plans in `_bmad-output/implementation-artifacts` and runtime evidence in `_wrx-output`.
 
 ## Repository
+- When resuming work, read `docs/session-handoff-2026-09-10.md` for session context, then verify current Git/deployment state. It is a dated handoff, not proof of current production health.
 - Next.js is in `frontend/`; read its local AGENTS.md and installed version's relevant docs before framework changes.
 - FastAPI and Decimal business rules are in `backend/`.
 - `backend/config.py` anchors .env paths to this Git root. `backend/storage.py` owns filesystem access.
