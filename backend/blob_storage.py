@@ -23,6 +23,10 @@ FETCH_DOWNLOAD = ContextVar('fetch_download', default=False)
 API = 'https://vercel.com/api/blob'
 
 
+class BlobTemporaryError(OSError):
+    """A service/transport failure whose write outcome may be unknown."""
+
+
 class BlobFileStore:
     def __init__(self, *, token=None, prefix=None, transport=None):
         self.token = token or os.environ.get('BLOB_READ_WRITE_TOKEN', '')
@@ -60,8 +64,10 @@ class BlobFileStore:
                         decoded_headers.pop(name, None)
                     response=httpx.Response(streamed.status_code,headers=decoded_headers,content=b''.join(chunks))
         except httpx.TransportError:
-            raise OSError('Blob service connection failed') from None
+            raise BlobTemporaryError('Blob service connection failed') from None
         if response.status_code in (409, 412): raise WriteConflict('Blob version conflict')
+        if response.status_code in (429, 500, 502, 503, 504):
+            raise BlobTemporaryError(f'Blob temporarily unavailable (HTTP {response.status_code})')
         if response.status_code == 404: return response
         if not response.is_success:
             try: code=response.json().get('error', {}).get('code')
@@ -94,8 +100,31 @@ class BlobFileStore:
                  'x-allow-overwrite':'1' if expected is not None else '0',
                  'x-content-type':'application/json' if key.endswith('.json') else 'application/octet-stream'}
         if expected is not None: headers['x-if-match'] = expected
-        response = self.request('PUT', API, params={'pathname': self.key(key)}, content=content, headers=headers)
-        if response.status_code == 404: raise OSError('Blob store not found')
+        for attempt in range(3):
+            try:
+                response = self.request('PUT', API, params={'pathname': self.key(key)}, content=content, headers=headers)
+                if response.status_code == 404: raise OSError('Blob store not found')
+                return
+            except BlobTemporaryError:
+                # A failed response does not mean the write failed. Verify the
+                # exact bytes before retrying the SAME path and original ETag.
+                try:
+                    current, version = self.read_version(key)
+                except BlobTemporaryError:
+                    pass  # Retrying the original conditional write stays safe.
+                else:
+                    if current == content: return
+                    if version != expected:
+                        raise WriteConflict('Blob changed while recovering a write') from None
+                if attempt == 2: raise
+                time.sleep(0.5 * (2 ** attempt))
+            except WriteConflict:
+                if attempt:
+                    # The previous attempt may have committed even if its
+                    # verification read also failed temporarily.
+                    current, _ = self.read_version(key)
+                    if current == content: return
+                raise
 
     def compare_and_swap(self, key, content, expected): self.put(key, content, expected)
     def write(self, key, content): self.put(key, content)
