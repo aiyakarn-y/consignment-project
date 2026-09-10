@@ -1,0 +1,9 @@
+.env*
+data/
+.venv/
+**/node_modules/
+**/.next*/
+**/__pycache__/
+.pytest_cache/
+_wrx-output/
+.git/
