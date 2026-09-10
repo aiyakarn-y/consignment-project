@@ -33,11 +33,15 @@ class ImportProfile(BaseModel):
     branch:str=Field(default='',max_length=150)
     discount_mode:Literal['auto','percent','fraction','amount']='auto'
     valuation:Valuation=Field(default_factory=Valuation)
+    expected_headers:dict[str,str]=Field(default_factory=dict)
+    net_source:Literal['mapped','cost','none']='mapped'
     @model_validator(mode='after')
     def check(self):
         self.name=self.name.strip();self.customer=self.customer.strip()
         if not self.name:raise ValueError('ระบุชื่อรูปแบบ')
         self.columns={k:v.strip().upper() for k,v in self.columns.items() if v.strip()}
+        if len(set(self.columns.values()))!=len(self.columns):raise ValueError('คอลัมน์ Mapping ซ้ำ กรุณาเลือกคอลัมน์แยกให้ถูกต้อง')
+        if self.net_source=='cost' and not {'cost_price','cost_total'}&self.columns.keys():raise ValueError('ต้องระบุคอลัมน์ต้นทุนเมื่อเลือกใช้ต้นทุนเป็นยอดส่งคืน')
         if set(self.columns)-FIELDS:raise ValueError('มีช่อง Mapping ที่ไม่รองรับ')
         if any(not re.fullmatch('[A-Z]{1,3}',v) or openpyxl.utils.column_index_from_string(v)>200 for v in self.columns.values()):raise ValueError('คอลัมน์ต้องอยู่ระหว่าง A–GR')
         if not {'sku','partner'}&self.columns.keys():raise ValueError('ต้องมี SKU หรือรหัสสินค้าอ้างอิง')
@@ -65,37 +69,89 @@ def inspect_workbook(content,sheet='',header_row=1):
         return dict(sheets=[dict(name=x.title,rows=x.max_row,columns=x.max_column) for x in w],sheet=s.title,header_row=header_row,columns=[dict(column=openpyxl.utils.get_column_letter(i+1),label=str(v or '')) for i,v in enumerate(rows[0])],sample=[[str(v) if v is not None else '' for v in line] for line in rows[1:]])
     finally:w.close()
 
-def parse_profile(content,name,profile):
-    cfg=ImportProfile.model_validate(profile);w=workbook(content)
+def header_text(value):
+    return ' '.join(str(value or '').split())
+
+
+def require_profile_headers(cfg):
+    if set(cfg.expected_headers)!=set(cfg.columns.values()) or any(not header_text(v) for v in cfg.expected_headers.values()):
+        raise ValueError('ยังไม่ได้ยืนยันหัวคอลัมน์ กรุณาดูตัวอย่าง Mapping และบันทึกรูปแบบใหม่ก่อนนำเข้า')
+
+
+def check_headers(sheet,cfg):
+    require_profile_headers(cfg)
+    for column,expected in cfg.expected_headers.items():
+        actual=header_text(sheet[f'{column}{cfg.header_row}'].value)
+        if actual!=header_text(expected):
+            raise ValueError(f'หัวคอลัมน์ชีต {sheet.title} ช่อง {column} เปลี่ยน: คาดว่า {expected} แต่พบ {actual or "(ว่าง)"} กรุณาตรวจ Mapping ใหม่')
+
+
+def bind_profile_headers(content,profile):
+    cfg=ImportProfile.model_validate(profile)
+    w=workbook(content)
     try:
         if cfg.sheet not in w.sheetnames:raise ValueError('ไม่พบชีตที่ตั้งค่า: '+cfg.sheet)
-        s=w[cfg.sheet]
-        if (s.max_row or 0)>50000 or (s.max_column or 0)>200:raise ValueError('รูปแบบตารางรองรับไม่เกิน 50,000 แถว / 200 คอลัมน์')
-        end=cfg.end_row or s.max_row
-        columns={k:openpyxl.utils.column_index_from_string(v)-1 for k,v in cfg.columns.items()}
+        cfg.expected_headers={c:header_text(w[cfg.sheet][f'{c}{cfg.header_row}'].value) for c in cfg.columns.values()}
+        require_profile_headers(cfg)
+        return cfg.model_dump()
+    finally:w.close()
+
+
+def inspect_sheet_choices(content,profile=None):
+    from backend.core import sheet_kind
+    w=workbook(content)
+    try:
+        result=[]
+        cfg=ImportProfile.model_validate(profile) if profile else None
+        for sheet in w:
+            kind=sheet_kind(sheet) if cfg is None else 'รูปแบบ: '+cfg.name
+            reason=''
+            if cfg:
+                try:check_headers(sheet,cfg)
+                except ValueError as ex:kind='';reason=str(ex)
+            result.append(dict(name=sheet.title,kind=kind,supported=bool(kind),reason=reason or ('' if kind else 'ชีตประกอบ/ไม่รองรับรูปแบบนี้'),suggested=bool(kind) and (cfg is None or sheet.title==cfg.sheet)))
+        return result
+    finally:w.close()
+
+
+def parse_profile(content,name,profile,sheets=None):
+    cfg=ImportProfile.model_validate(profile);w=workbook(content)
+    try:
+        selected=[cfg.sheet] if sheets is None else sheets
+        if not selected or len(selected)!=len(set(selected)) or any(name not in w.sheetnames for name in selected):raise ValueError('เลือกชีตที่มีอยู่จริงและไม่ซ้ำอย่างน้อยหนึ่งชีต')
         out=[]
-        for i,cells in enumerate(s.iter_rows(min_row=cfg.header_row+1,max_row=end,values_only=True),cfg.header_row+1):
-            values={k:cells[j] if j<len(cells) else None for k,j in columns.items()}
-            if all(v is None or str(v).strip()=='' for v in values.values()):continue
-            raw={openpyxl.utils.get_column_letter(j+1):str(v) for j,v in enumerate(cells) if v is not None}
-            try:
-                q=dec(values.get('qty'));cost_unit=dec(values.get('cost_price'));cost_total=dec(values.get('cost_total'))
-                if cost_total is None and cost_unit is not None and q is not None:cost_total=cost_unit*q
-                net=dec(values.get('net'))
-                if net is None:net=cost_total
-                discount=values.get('discount')
-                if discount is not None and str(discount).strip():
-                    if cfg.discount_mode=='fraction':discount=fmt(dec(discount)*100)+'%'
-                    elif cfg.discount_mode=='percent':discount=discount_text(discount)
-                    elif cfg.discount_mode=='amount':
-                        gross=dec(values.get('gross'))
-                        if gross is None and q is not None and dec(values.get('price')) is not None:gross=q*dec(values['price'])
-                        if gross is None or gross==0:raise ValueError('ส่วนลดจำนวนเงินต้องมียอดขายรวมไม่เป็นศูนย์')
-                        discount=reverse_discount(gross,gross-dec(discount))
-                r=row(name,s.title,i,code(values.get('customer')) or cfg.customer,code(values.get('branch')) or cfg.branch,code(values.get('sku')),q,values.get('price'),discount,values.get('gross'),net,values.get('barcode'),values.get('partner'),date=values.get('date'),raw=raw)
-                r.update(branch_code=code(values.get('branch_code')),valuation=cfg.valuation.model_dump(),custom_source=dict(cost_price=fmt(cost_unit),cost_total=fmt(cost_total),qty=fmt(q),gp=r['discount'] if discount not in (None,'') else None,mg=code(values.get('mg')) or None),import_profile=cfg.name)
-                out.append(validate(r))
-            except (ValueError,TypeError,ArithmeticError) as ex:raise ValueError(f'แถว {i}: {ex}')
+        for sheet_name in selected:
+            s=w[sheet_name]
+            first_row=len(out)
+            check_headers(s,cfg)
+            if (s.max_row or 0)>50000 or (s.max_column or 0)>200:raise ValueError('รูปแบบตารางรองรับไม่เกิน 50,000 แถว / 200 คอลัมน์')
+            end=cfg.end_row or s.max_row
+            columns={k:openpyxl.utils.column_index_from_string(v)-1 for k,v in cfg.columns.items()}
+            for i,cells in enumerate(s.iter_rows(min_row=cfg.header_row+1,max_row=end,values_only=True),cfg.header_row+1):
+                values={k:cells[j] if j<len(cells) else None for k,j in columns.items()}
+                if all(v is None or str(v).strip()=='' for v in values.values()):continue
+                raw={openpyxl.utils.get_column_letter(j+1):str(v) for j,v in enumerate(cells) if v is not None}
+                try:
+                    q=dec(values.get('qty'));cost_unit=dec(values.get('cost_price'));cost_total=dec(values.get('cost_total'))
+                    if cost_total is None and cost_unit is not None and q is not None:cost_total=cost_unit*q
+                    net=dec(values.get('net')) if cfg.net_source=='mapped' else None
+                    if cfg.net_source=='cost':
+                        if cost_total is None:raise ValueError('ไม่มีต้นทุนสำหรับยอดส่งคืนที่เลือก กรุณาตรวจต้นทาง')
+                        net=cost_total
+                    discount=values.get('discount')
+                    if discount is not None and str(discount).strip():
+                        if cfg.discount_mode=='fraction':discount=fmt(dec(discount)*100)+'%'
+                        elif cfg.discount_mode=='percent':discount=discount_text(discount)
+                        elif cfg.discount_mode=='amount':
+                            gross=dec(values.get('gross'))
+                            if gross is None and q is not None and dec(values.get('price')) is not None:gross=q*dec(values['price'])
+                            if gross is None or gross==0:raise ValueError('ส่วนลดจำนวนเงินต้องมียอดขายรวมไม่เป็นศูนย์')
+                            discount=reverse_discount(gross,gross-dec(discount))
+                    r=row(name,s.title,i,code(values.get('customer')) or cfg.customer,code(values.get('branch')) or cfg.branch,code(values.get('sku')),q,values.get('price'),discount,values.get('gross'),net,values.get('barcode'),values.get('partner'),date=values.get('date'),raw=raw)
+                    r.update(branch_code=code(values.get('branch_code')),valuation=cfg.valuation.model_dump(),custom_source=dict(cost_price=fmt(cost_unit),cost_total=fmt(cost_total),qty=fmt(q),gp=r['discount'] if discount not in (None,'') else None,mg=code(values.get('mg')) or None),import_profile=cfg.name,net_source=cfg.net_source)
+                    out.append(validate(r))
+                except (ValueError,TypeError,ArithmeticError) as ex:raise ValueError(f'แถว {i}: {ex}')
+            if len(out)==first_row:raise ValueError('ไม่พบข้อมูลหลังแถวหัวตารางในชีตที่เลือก: '+sheet_name)
         if not out:raise ValueError('ไม่พบข้อมูลหลังแถวหัวตาราง')
         return out,'รูปแบบ: '+cfg.name
     finally:w.close()

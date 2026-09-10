@@ -26,3 +26,13 @@
 
 .brand { font-size: 15px; letter-spacing: -.5px; padding: 0; gap: 7px; }
 .brandmark { flex-shrink: 0; width: 30px; height: 34px; }
+
+.history-pagination{flex-direction:row;flex-wrap:wrap;gap:12px}
+.history-pagination>div{flex-wrap:wrap;gap:8px}
+.history-pagination button{width:auto;height:auto;padding:6px 10px;white-space:nowrap}
+.history-pagination label{display:flex;align-items:center;gap:6px;white-space:nowrap}
+
+.sheet-selection{margin:18px 0;padding:12px;border:1px solid var(--line)}
+.sheet-selection small{display:block;color:#6a7786}
+.sheet-report{margin:12px 0;padding:12px;background:white;border:1px solid var(--line);border-radius:8px}
+.sheet-report>div{margin:12px 0}

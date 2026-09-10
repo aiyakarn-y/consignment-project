@@ -52,7 +52,7 @@ def test_barcode_is_not_a_grouping_key(client):
 def test_returns_and_zero_quantity_groups(client):
     url=seed(client,[sale('SKU-A',3,100,'10%'),sale('SKU-A',-1,100,'10%'),sale('SKU-B',1,100,'0%'),sale('SKU-B',-1,100,'0%')])
     response=client.get(url+'/export?scope=ready');values=read(response)
-    assert values==[('SKU-A',100,2,'10%')]
+    assert values==[('SKU-A',100,2,'10.00%')]
     assert response.headers['x-skipped-rows']=='2'
     assert client.get(url).json()['blocked']==2
 

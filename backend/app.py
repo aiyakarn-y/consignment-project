@@ -9,10 +9,10 @@ import csv, hashlib, io, json, os, sqlite3, uuid, zipfile
 from fastapi import FastAPI, UploadFile, HTTPException, Query, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from backend.core import parse, validate, export_xlsx, dec, fmt, money, percent, discount_text, reverse_discount, code, review_and_merge, below_cost_snapshot
+from backend.core import parse, validate, export_xlsx, dec, fmt, money, percent, discount_text, reverse_discount, export_discount, export_net, code, review_and_merge, below_cost_snapshot
 import openpyxl
 
-from backend.config import ROOT, DATA, DB, TEMPLATE, SAMPLES
+from backend.config import APP_VERSION, ROOT, DATA, DB, TEMPLATE, SAMPLES
 from backend.storage import LocalFileStore, ASSET, LEGACY_ASSET
 from contextlib import asynccontextmanager
 
@@ -32,7 +32,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title='ConsignmentSystem', version='0.2.0', lifespan=lifespan)
+app = FastAPI(title='ConsignmentSystem', version=APP_VERSION, lifespan=lifespan)
 
 @contextmanager
 def db():
@@ -64,20 +64,24 @@ def save(b):
     with db() as c:
         c.execute('INSERT OR REPLACE INTO batches VALUES (?,?)',(b['id'],json.dumps(b,ensure_ascii=False)))
         for f in b['files']:
+            if f.get('history_cleared'):continue
             record=dict(id=f['id'],hash=f['hash'],name=f['name'],batch_id=b['id'],period=b['period'],at=f.get('imported_at',b['created']),duplicate_override=f.get('duplicate_override',False),error=f.get('error'))
             c.execute('INSERT OR IGNORE INTO import_registry VALUES (?,?)',(f['id'],json.dumps(record,ensure_ascii=False)))
 
 
-def mapped(b):
+def mapped(b,extra_maps=None):
     with db() as c:
         maps=dict(c.execute('SELECT key,sku FROM mappings'))
         rules=dict(c.execute('SELECT customer,discount FROM rules'))
+    if extra_maps:maps.update(extra_maps)
     for r in b['rows']:
-        if not r['sku']:
+        if not r['sku'] or r.get('sku_origin')=='ใช้รหัสอ้างอิงสินค้าต้นทาง · แก้ไขได้':
             sku=maps.get('barcode:'+r['barcode']) if r['barcode'] else None
             sku=sku or maps.get('partner:'+r['customer']+':'+r['partner'])
             if sku:
+                before={'sku':r['sku'],'sku_origin':r.get('sku_origin')}
                 r.update(sku=sku,sku_origin='ตารางอ้างอิง')
+                r.setdefault('edits',[]).append(dict(at=datetime.now(timezone.utc).isoformat(),before=before,after={'sku':sku,'sku_origin':r['sku_origin']},reason='Master Mapping'))
         if (not r['discount'] or r.get('discount_defaulted')) and r['customer'] in rules:
             r.pop('discount_issue',None)
             r.update(discount=rules[r['customer']],discount_origin='กติกาที่บันทึกไว้',discount_defaulted=False)
@@ -98,11 +102,12 @@ def summary(b):
     def add(g,r):
         g['rows']+=1;g[r['status']]+=1
         for k in ('qty','gross','net','calculated_net','source_cost_total','calculated_gross','source_sales_ex_vat'):
-            if r.get(k) is not None:g[k]+=dec(r[k])
+            value=r.get('source_reference',r).get(k) if k in ('gross','net') else r.get(k)
+            if value is not None:g[k]+=dec(value)
         g['cost_rows']+=r.get('source_cost_total') is not None
         g['gross_rows']+=r.get('calculated_gross') is not None
         g['exvat_rows']+=r.get('source_sales_ex_vat') is not None
-        g['net_rows']+=r.get('net') is not None
+        g['net_rows']+=r.get('source_reference',r).get('net') is not None
         g['calculated_rows']+=r.get('calculated_net') is not None
         g['default_discount_rows']+=bool(r.get('discount_defaulted'))
     def finish(g):
@@ -132,7 +137,7 @@ def summary(b):
                 exportable=bool(b['rows']) and not blocked and not any(f.get('error') for f in b['files']))
 
 
-def add_file(b,content,name,profile=None,allow_duplicate=False,check_history=False):
+def add_file(b,content,name,profile=None,allow_duplicate=False,check_history=False,sheets=None):
     name=Path(name).name
     digest=hashlib.sha256(content).hexdigest()
     if any(f['hash']==digest for f in b['files']):
@@ -160,8 +165,14 @@ def add_file(b,content,name,profile=None,allow_duplicate=False,check_history=Fal
         if profile:
             if not name.lower().endswith('.xlsx'):raise ValueError('รูปแบบที่ตั้งค่าใช้กับ Excel เท่านั้น')
             from backend.import_profiles import parse_profile
-            rows,kind=parse_profile(content,name,profile['config'])
-        else:rows,kind=parse(path,name)
+            rows,kind=parse_profile(content,name,profile['config'],sheets=sheets)
+        else:rows,kind=parse(path,name,sheets=sheets)
+        if name.lower().endswith('.xlsx'):
+            from backend.import_profiles import inspect_sheet_choices
+            info['sheet_review']=inspect_sheet_choices(content,profile['config'] if profile else None)
+            for item in info['sheet_review']:
+                members=[r for r in rows if r['sheet']==item['name']]
+                item.update(selected=bool(members),rows=len(members),gross=fmt(sum((dec(r.get('gross')) or Decimal(0) for r in members),Decimal(0))))
         for r in rows:
             r.update(id=uuid.uuid4().hex,file_id=file_id)
             settings=valuation_for(r['customer'])
@@ -178,7 +189,7 @@ class NewBatch(BaseModel):
 
 
 @app.get('/api/health')
-def health(): return {'ok':True,'version':'0.2.0','name':'ConsignmentSystem'}
+def health(): return {'ok':True,'version':APP_VERSION,'name':'ConsignmentSystem'}
 
 @app.get('/api/batches')
 def batches():
@@ -250,15 +261,20 @@ def sample(batch_id:str):
     save(mapped(b));return summary(b)
 
 @app.post('/api/batches/{batch_id}/upload')
-def upload(batch_id:str,files:list[UploadFile],profile_id:str=Form(''),allow_duplicate:bool=Form(False)):
+def upload(batch_id:str,files:list[UploadFile],profile_id:str=Form(''),allow_duplicate:bool=Form(False),sheet_selection:str=Form('{}')):
     if len(files)>10: raise HTTPException(400,'อัปโหลดครั้งละไม่เกิน 10 ไฟล์')
     from backend.operations import get_profile
     profile=get_profile(profile_id) if profile_id else None
+    try:
+        selections=json.loads(sheet_selection)
+        if not isinstance(selections,dict) or any(not key.isdigit() or int(key)>=len(files) or not isinstance(names,list) or not names or any(not isinstance(n,str) for n in names) for key,names in selections.items()):
+            raise ValueError('รูปแบบการเลือกชีตไม่ถูกต้อง')
+    except (ValueError,TypeError) as ex:raise HTTPException(400,str(ex))
     b=load(batch_id)
     previous = {f['id'] for f in b['files']}
     try:
-        for f in files:
-            add_file(b,f.file.read(25*1024*1024+1),f.filename or 'unknown',profile,allow_duplicate,True)
+        for index,f in enumerate(files):
+            add_file(b,f.file.read(25*1024*1024+1),f.filename or 'unknown',profile,allow_duplicate,True,sheets=selections.get(str(index)))
         save(mapped(b))
     except Exception:
         with db() as c:
@@ -344,7 +360,8 @@ def apply_row_changes(r,changes):
     if 'discount' in changes or 'net' in changes:
         r.pop('discount_issue',None)
         r['discount_defaulted']=False
-    before={k:r.get(k) for k in changes}
+    before={k:r.get(k) for k in set(changes) | {'gross','net','discount'}}
+    original={k:r.get(k) for k in ('price','qty','discount','gross','net')}
     try:
         for k,v in changes.items():
             if k in ('qty','price','net'):
@@ -353,13 +370,25 @@ def apply_row_changes(r,changes):
                 r[k]=discount_text(v) if v else ''
                 r['discount_origin']='ผู้ใช้กรอก'
             else:
-                r[k]=(v or '').strip();r['sku_origin']='ผู้ใช้กรอก'
+                value=(v or '').strip()
+                if value!=r.get(k):r['sku_origin']='ผู้ใช้กรอก'
+                r[k]=value
         if 'net' in changes and r.get('net') is not None and 'discount' not in changes:
             r['discount']=reverse_discount(dec(r['price'])*dec(r['qty']),dec(r['net'])) or ''
             r['discount_origin']='คำนวณจากยอดสุทธิที่ผู้ใช้ระบุ'
+        amounts_changed = 'discount' in changes or any(
+            k in changes and r.get(k) != original[k] for k in ('price','qty','net'))
+        if amounts_changed:
+            r.setdefault('source_reference', original)
+            p, q, factor = dec(r.get('price')), dec(r.get('qty')), percent(r.get('discount'))
+            if p is not None and q is not None:
+                if any(k in changes and r.get(k) != original[k] for k in ('price','qty')):
+                    r['gross'] = fmt(money(p*q))
+                if 'net' not in changes and factor is not None:
+                    r['net'] = fmt(money(p*q*factor))
         validate(r)
     except (ValueError,TypeError) as ex: raise HTTPException(400,str(ex))
-    r['edits'].append(dict(at=datetime.now(timezone.utc).isoformat(),before=before,after=changes))
+    r['edits'].append(dict(at=datetime.now(timezone.utc).isoformat(),before=before,after={k:r.get(k) for k in before}))
 
 
 class BulkEdit(BaseModel):
@@ -377,6 +406,15 @@ def bulk_edit(batch_id:str,payload:BulkEdit):
     # Save once: malformed inputs cannot leave a partially updated batch.
     summary(b);save(b)
     return {'updated':len(selected),'blocked':sum(r['status']=='blocked' for r in selected)}
+
+
+@app.post('/api/batches/{batch_id}/rows/{row_id}/preview')
+def preview_edit(batch_id:str,row_id:str,payload:Edit):
+    b=load(batch_id)
+    r=next((r for r in b['rows'] if r['id']==row_id),None)
+    if r is None:raise HTTPException(404,'ไม่พบรายการ')
+    apply_row_changes(r,payload.model_dump(exclude_unset=True,exclude={'remember'}))
+    return r  # Loaded copy only: previews never persist edits or confirmations.
 
 
 @app.patch('/api/batches/{batch_id}/rows/{row_id}')
@@ -406,18 +444,15 @@ def rule(batch_id:str,payload:Rule):
     b=load(batch_id);count=0
     for r in b['rows']:
         if r['customer']==payload.customer and (not r['discount'] or r.get('discount_defaulted')):
-            r.pop('discount_issue',None)
-            previous=r['discount']
-            r['discount_defaulted']=False
-            r['discount']=discount;r['discount_origin']='ผู้ใช้กำหนดแทนค่าเริ่มต้น'
-            r['edits'].append(dict(at=datetime.now(timezone.utc).isoformat(),before={'discount':previous},after={'discount':discount}))
-            validate(r);count+=1
+            apply_row_changes(r,{'discount':discount})
+            r['discount_origin']='ผู้ใช้กำหนดแทนค่าเริ่มต้น'
+            count+=1
     if payload.remember:
         with db() as c:c.execute('INSERT OR REPLACE INTO rules VALUES (?,?)',(payload.customer,discount))
     save(b);return {'updated':count}
 
 @app.post('/api/batches/{batch_id}/master')
-def master(batch_id:str,file:UploadFile):
+def master(batch_id:str,file:UploadFile,preview:bool=Form(False)):
     b=load(batch_id);content=file.file.read(10*1024*1024+1)
     if len(content)>10*1024*1024: raise HTTPException(413,'ตารางอ้างอิงต้องไม่เกิน 10 MB')
     try:
@@ -450,10 +485,12 @@ def master(batch_id:str,file:UploadFile):
             for key,sku in entries.items():
                 old=c.execute('SELECT sku FROM mappings WHERE key=?',(key,)).fetchone()
                 if old and old[0]!=sku:raise ValueError('Mapping ขัดแย้งกับข้อมูลที่บันทึกไว้: '+key)
-            c.executemany('INSERT OR REPLACE INTO mappings VALUES (?,?)',entries.items())
+            if not preview:c.executemany('INSERT OR REPLACE INTO mappings VALUES (?,?)',entries.items())
     except Exception as ex:raise HTTPException(400,str(ex)[:300])
-    before=sum(not r['sku'] for r in b['rows']);mapped(b);save(b)
-    return {'mappings':len(entries),'resolved':before-sum(not r['sku'] for r in b['rows'])}
+    before=[r['sku'] for r in b['rows']];mapped(b,entries)
+    changes=[dict(id=r['id'],before=old,after=r['sku']) for old,r in zip(before,b['rows']) if old!=r['sku']]
+    if not preview:save(b)
+    return {'mappings':len(entries),'resolved':len(changes),'changes':changes[:100],'preview':preview}
 
 @app.get('/api/batches/{batch_id}/files/{file_id}')
 def source_file(batch_id:str,file_id:str):
@@ -485,13 +522,14 @@ def export(batch_id:str,scope:Literal['all','ready']='all'):
     except ValueError as ex:raise HTTPException(409,str(ex))
     suffix='_ready' if scope=='ready' else ''
     from backend.operations import json_rows,put
-    snapshot=dict(period=b['period'],template_hash=hashlib.sha256(TEMPLATE.read_bytes()).hexdigest(),rows=[{k:r[k] for k in ('sku','price','qty','discount')} for r in sorted(rows,key=lambda r:r['sku'])])
+    rounding_delta=fmt(sum((export_net(r)-dec(r['net']) for r in rows),Decimal(0)))
+    snapshot=dict(period=b['period'],template_hash=hashlib.sha256(TEMPLATE.read_bytes()).hexdigest(),rows=[dict(sku=r['sku'],price=str(float(dec(r['price']))),qty=str(float(dec(r['qty']))),discount=export_discount(r['discount'])) for r in sorted(rows,key=lambda r:r['sku'])])
     snapshot_hash=hashlib.sha256(json.dumps(snapshot,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
     previous=sum(e['snapshot_hash']==snapshot_hash for e in json_rows('export_history'))
-    record=dict(id=uuid.uuid4().hex,batch_id=batch_id,at=datetime.now(timezone.utc).isoformat(),scope=scope,rows=len(rows),source_rows=included,skipped_rows=state['blocked'],skipped_files=state['file_errors'],filename=f'Consign_{b["period"]}{suffix}.xlsx',path=key,hash=hashlib.sha256(path.read_bytes()).hexdigest(),snapshot_hash=snapshot_hash,snapshot=snapshot,source_files=[{k:f[k] for k in ('id','name','hash')} for f in b['files']],previous_identical_exports=previous)
+    record=dict(id=uuid.uuid4().hex,batch_id=batch_id,at=datetime.now(timezone.utc).isoformat(),scope=scope,rows=len(rows),source_rows=included,skipped_rows=state['blocked'],skipped_files=state['file_errors'],filename=f'Consign_{b["period"]}{suffix}.xlsx',path=key,hash=hashlib.sha256(path.read_bytes()).hexdigest(),snapshot_hash=snapshot_hash,snapshot=snapshot,rounding_delta=rounding_delta,source_files=[{k:f[k] for k in ('id','name','hash')} for f in b['files']],previous_identical_exports=previous)
     put('export_history',record['id'],record)
     return FileResponse(path,filename=f'Consign_{b["period"]}{suffix}.xlsx',
-        headers={'X-Export-ID':record['id'],'X-Previous-Identical-Exports':str(previous),'X-Exported-Rows':str(len(rows)),
+        headers={'X-Export-Rounding-Delta':rounding_delta,'X-Export-ID':record['id'],'X-Previous-Identical-Exports':str(previous),'X-Exported-Rows':str(len(rows)),
                  'X-Exported-Source-Rows':str(included),
                  'X-Skipped-Rows':str(len(b['rows'])-included),
                  'X-Skipped-Files':str(state['file_errors'])},

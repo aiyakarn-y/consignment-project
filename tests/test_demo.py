@@ -81,7 +81,8 @@ def test_export_preserves_template_and_reconstructs_net(tmp_path,reports):
     for i,r in enumerate(rows,2):
         sku,p,q,discount=[c.value for c in ws[i]]
         assert sku==r['sku']
-        assert money(D(str(p))*D(str(q))*percent(discount))==money(D(r['net']))
+        expected_discount='+'.join(f'{money(D(part.rstrip(chr(37)))):.2f}%' for part in r['discount'].split('+'))
+        assert discount==expected_discount
         for col in range(1,5): assert ws.cell(i,col)._style==src['Sample'].cell(2,col)._style
     for col in 'ABCD':assert ws.column_dimensions[col].width==src['Sample'].column_dimensions[col].width
     assert hashlib.sha256(template.read_bytes()).hexdigest()==before
@@ -168,11 +169,15 @@ def test_ready_only_export_excludes_blocked_and_preserves_batch(client):
     for r in expected:
         totals=by_sku.setdefault(r['sku'],[D(0),D(0),D(0)])
         totals[0]+=D(r['qty']);totals[1]+=money(D(r['gross']));totals[2]+=money(D(r['calculated_net']))
+    rounding_delta=D(0)
     for sku,p,q,d in values:
         target=by_sku[sku]
         assert D(str(q))==target[0]
         assert money(D(str(p))*D(str(q)))==target[1]
-        assert money(D(str(p))*D(str(q))*percent(d))==target[2]
+        assert all(len(part.rstrip('%').split('.')[1])==2 for part in d.split('+'))
+        rounding_delta+=money(D(str(p))*D(str(q))*percent(d))-target[2]
+    assert rounding_delta==D('1.41')
+    assert D(response.headers['X-Export-Rounding-Delta'])==rounding_delta
     preview=client.get(url+'/merged?size=100').json()
     assert preview['total']==1008 and len(preview['rows'])==100
     wb.close()

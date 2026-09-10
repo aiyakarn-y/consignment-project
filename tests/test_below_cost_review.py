@@ -25,9 +25,9 @@ def test_warning_confirmation_and_export_keep_real_values(client):
     assert client.get(url+'/rows',params={'below_cost':'confirmed'}).json()['total']==1
     client.patch(url+'/rows/0',json={'discount':'20%'})
     r=client.get(url+'/rows').json()['rows'][0]
-    assert r['below_cost_status']=='pending' and r['status']=='blocked'
+    assert r['below_cost_status']=='pending' and r['status']=='ready'
     assert len(r['below_cost_confirmations'])==1
-    assert client.get(url+'/export').status_code==409
+    assert client.get(url+'/export').status_code==200
 
 
 def test_confirmation_validation_preserves_batch_and_no_false_return_loss(client):

@@ -110,9 +110,11 @@ test('real files → review → reverse discount → master mapping → exact Ex
   // Explicitly entering the displayed rounded rate is an actual edit, unlike untouched save.
   await page.getByLabel('แก้ Discount').fill('39.24%');
   await page.getByLabel('แก้ Discount').fill('39.25%');
+  await expect(page.getByLabel('แก้ยอดสุทธิ')).toHaveValue('1202.85');
   await page.getByRole('button',{name:'บันทึกและตรวจยอด'}).click();
-  await expect(page.getByRole('dialog')).toContainText('ยอดสุทธิไม่ตรงต้นทาง');
-  await expect(page.getByRole('button',{name:'บันทึกและตรวจยอด'})).toBeEnabled();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('tbody tr').filter({hasText:'KING POWER'})).toContainText('1,202.85');
+  await page.getByRole('button',{name:'แก้รายการ WA-223PLACL30-EE-M',exact:true}).click();
   await page.getByLabel('แก้ Discount').fill('39.2525252525%');
   await page.getByRole('button',{name:'บันทึกและตรวจยอด'}).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -143,6 +145,7 @@ test('real files → review → reverse discount → master mapping → exact Ex
   await expect(page.getByRole('dialog')).toContainText('ค่าเริ่มต้น 0%');
   const p=Number(await page.getByLabel('แก้ Price').inputValue()),q=Number(await page.getByLabel('แก้ Qty').inputValue());
   await page.getByLabel('แก้ยอดสุทธิ').fill((p*q*.9).toFixed(2));
+  await expect(page.getByLabel('แก้ Discount')).toHaveValue('10.00%');
   await page.getByRole('button',{name:'บันทึกและตรวจยอด'}).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('.stat.amber strong')).toContainText('0');
@@ -176,14 +179,14 @@ test('real files → review → reverse discount → master mapping → exact Ex
   await page.getByLabel('อัปโหลดรายงาน').setInputFiles(path.resolve('data/local/samples/SALES WIX AUG 26.xlsx'));
   await expect(page.locator('.stat').filter({hasText:'รายการขาย'}).locator('strong')).toContainText('43');
   await expect(page.getByRole('button',{name:'Export Excel',exact:true})).toBeEnabled();
-  await page.route('**/api/batches/*/upload',route=>route.fulfill({status:400,contentType:'application/json',body:JSON.stringify({detail:'ทดสอบไฟล์ไม่ถูกต้อง'})}));
   await page.getByLabel('อัปโหลดรายงาน').setInputFiles({name:'bad.xlsx',mimeType:'application/octet-stream',buffer:Buffer.from('bad')});
-  await expect(page.locator('.notice[role=alert]')).toContainText('ทดสอบไฟล์ไม่ถูกต้อง');
+  await expect(page.locator('.notice[role=alert]')).toContainText('ไฟล์ Excel ไม่สมบูรณ์');
   await expect(page.getByRole('dialog',{name:'กำลังดำเนินการ'})).toHaveCount(0);
-  await page.unroute('**/api/batches/*/upload');
   const current=(await (await request.get('/api/batches')).json())[0];
   const state=await (await request.get(`/api/batches/${current.id}`)).json();
   await page.route('**/api/batches/*/upload',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({...state,files:[...state.files,{id:'new-failed',name:'unknown.xlsx',kind:'ไม่รองรับ',rows:0,error:'ไม่รองรับรูปแบบนี้'},{id:'new-ok',name:'valid.xlsx',kind:'sample',rows:2,error:null}]})}));
+  // This case tests the mixed-result notice, so supply an explicit successful preflight too.
+  await page.route('**/api/batches/*/check-upload',route=>route.fulfill({status:200,json:[{name:'mixed.xlsx',same_batch:false,previous:[],sheets:[]}]}));
   await page.getByLabel('อัปโหลดรายงาน').setInputFiles({name:'mixed.xlsx',mimeType:'application/octet-stream',buffer:Buffer.from('mixed')});
   await expect(page.locator('.notice[role=alert]')).toContainText('นำเข้าสำเร็จบางไฟล์ · สำเร็จ 1 ไฟล์ / ไม่สำเร็จ 1 ไฟล์');
   await expect(page.getByRole('dialog',{name:'กำลังดำเนินการ'})).toHaveCount(0);

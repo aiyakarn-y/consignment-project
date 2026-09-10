@@ -17,7 +17,7 @@ Follow the user's current scope. Wrixon profile is codex-only unless explicitly 
 - See README for Docker and first-run setup. Missing Docker is a test limitation, not a passing container test.
 
 ## Non-obvious invariants
-- Merge by SKU only; money uses Decimal, not JS Number. Preserve signed quantities, exact output columns, source evidence, and full discount precision. UI discount rounding is presentation only.
+- Merge by SKU only; money uses Decimal, not JS Number. Preserve signed quantities, exact output columns, source evidence, and full internal discount precision. Export each discount component as two-decimal text (HALF_UP); disclose the resulting net rounding delta.
 - Keep GP/MG and source cost/settlement distinct. See `docs/business-rules.md`.
 - Do not use live data for clear/restore/edit tests. Migrations copy, validate, and preserve the old workspace.
 - Commit database deletions before cleanup; never resurrect records referencing deleted files. Retry cleanup idempotently.

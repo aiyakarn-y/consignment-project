@@ -12,7 +12,7 @@ def excel():
     w=openpyxl.Workbook();s=w.active;s.title='Sales';s.append(['Reference','Units','Sale','Cost','Total','Cost total','MG'])
     s.append(['NEW-SKU',2,107,101,214,202,5.61]);b=io.BytesIO();w.save(b);return b.getvalue()
 
-def profile():return dict(name='New branch',sheet='Sales',header_row=1,columns={'sku':'A','qty':'B','price':'C','cost_price':'D','gross':'E','cost_total':'F','mg':'G'},customer='New shop',discount_mode='auto')
+def profile():return dict(name='New branch',sheet='Sales',header_row=1,columns={'sku':'A','qty':'B','price':'C','cost_price':'D','gross':'E','cost_total':'F','mg':'G'},customer='New shop',discount_mode='auto',net_source='cost',expected_headers={'A':'Reference','B':'Units','C':'Sale','D':'Cost','E':'Total','F':'Cost total','G':'MG'})
 
 def upload(client,url,**data):return client.post(url+'/upload',files={'files':('new.xlsx',excel())},data=data)
 
@@ -99,7 +99,7 @@ def test_bad_restore_rejected_without_mutation(client):
 def test_profile_rejects_bad_mapping_and_amount_discount(client):
     assert client.post('/api/profiles',json={'config':dict(profile(),columns={'qty':'B'})}).status_code==400
     w=openpyxl.Workbook();s=w.active;s.title='Sales';s.append(['SKU','Qty','Price','Reduction']);s.append(['SKU',2,100,30]);buf=io.BytesIO();w.save(buf)
-    cfg=dict(profile(),columns={'sku':'A','qty':'B','price':'C','discount':'D'},discount_mode='amount')
+    cfg=dict(profile(),columns={'sku':'A','qty':'B','price':'C','discount':'D'},discount_mode='amount',net_source='mapped')
     r=client.post('/api/profiles/preview',files={'file':('amount.xlsx',buf.getvalue())},data={'config':json.dumps(cfg)})
     assert r.status_code==200 and r.json()['sample'][0]['discount']=='15%'
     assert r.json()['sample'][0]['calculated_net']=='170'

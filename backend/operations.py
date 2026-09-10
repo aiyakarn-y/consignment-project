@@ -4,10 +4,10 @@ from datetime import datetime,timezone
 from copy import deepcopy
 from decimal import Decimal
 import hashlib,io,json,re,uuid,zipfile
-from fastapi import APIRouter,UploadFile,Form,HTTPException
+from fastapi import APIRouter,UploadFile,Form,HTTPException,Query
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
-from backend.import_profiles import ImportProfile,Valuation,inspect_workbook,parse_profile
+from backend.import_profiles import ImportProfile,Valuation,inspect_workbook,parse_profile,bind_profile_headers,require_profile_headers,inspect_sheet_choices
 from backend.core import validate,review_and_merge,fmt,dec
 
 router=APIRouter(prefix='/api')
@@ -37,6 +37,7 @@ def backfill_registry(c):
     for body, in c.execute('SELECT body FROM batches').fetchall():
         b=json.loads(body)
         for f in b['files']:
+            if f.get('history_cleared'):continue
             r=dict(id=f['id'],hash=f['hash'],name=f['name'],batch_id=b['id'],period=b['period'],at=f.get('imported_at',b['created']),duplicate_override=f.get('duplicate_override',False),error=f.get('error'))
             c.execute('INSERT OR IGNORE INTO import_registry VALUES (?,?)',(f['id'],json.dumps(r,ensure_ascii=False)))
 
@@ -54,7 +55,8 @@ def list_profiles():return json_rows('profiles')
 
 @router.post('/profiles')
 def save_profile(payload:dict):
-    try:profile=ImportProfile.model_validate(payload.get('config',{})).model_dump()
+    try:
+        cfg=ImportProfile.model_validate(payload.get('config',{}));require_profile_headers(cfg);profile=cfg.model_dump()
     except (ValidationError,ValueError) as ex:raise HTTPException(400,str(ex))
     key=payload.get('id') or uuid.uuid4().hex
     old=get_profile(key) if payload.get('id') else None
@@ -68,10 +70,13 @@ def inspect(file:UploadFile,sheet:str=Form(''),header_row:int=Form(1)):
 
 @router.post('/profiles/preview')
 def preview(file:UploadFile,config:str=Form(...)):
-    try:rows,kind=parse_profile(file.file.read(25*1024*1024+1),file.filename or 'preview.xlsx',json.loads(config))
+    try:
+        content=file.file.read(25*1024*1024+1)
+        bound=bind_profile_headers(content,json.loads(config))
+        rows,kind=parse_profile(content,file.filename or 'preview.xlsx',bound)
     except Exception as ex:raise HTTPException(400,str(ex)[:1000])
     review_and_merge(rows)
-    return dict(kind=kind,rows=len(rows),ready=sum(r['status']=='ready' for r in rows),blocked=sum(r['status']=='blocked' for r in rows),sample=rows[:20])
+    return dict(config=bound,kind=kind,rows=len(rows),ready=sum(r['status']=='ready' for r in rows),blocked=sum(r['status']=='blocked' for r in rows),sample=rows[:20])
 
 @router.get('/valuations')
 def valuations():return json_rows('valuations')
@@ -97,25 +102,72 @@ def set_valuation(payload:dict):
     return dict(updated=count,settings=body)
 
 @router.post('/batches/{batch_id}/check-upload')
-def check_upload(batch_id:str,files:list[UploadFile]):
+def check_upload(batch_id:str,files:list[UploadFile],profile_id:str=Form('')):
     b=service().load(batch_id);results=[]
+    profile=get_profile(profile_id)['config'] if profile_id else None
     if len(files)>10:raise HTTPException(400,'สูงสุด 10 ไฟล์')
     for f in files:
         content=f.file.read(25*1024*1024+1)
         if len(content)>25*1024*1024:raise HTTPException(413,'ไฟล์ต้องไม่เกิน 25 MB')
         sha=digest(content)
-        results.append(dict(name=f.filename,hash=sha,same_batch=any(x['hash']==sha for x in b['files']),previous=duplicate_matches(sha,batch_id)))
+        sheets=[]
+        if (f.filename or '').lower().endswith('.xlsx'):
+            try:sheets=inspect_sheet_choices(content,profile)
+            except ValueError as ex:raise HTTPException(400,str(ex))
+        results.append(dict(sheets=sheets,name=f.filename,hash=sha,same_batch=any(x['hash']==sha for x in b['files']),previous=duplicate_matches(sha,batch_id)))
     return results
 
+@router.delete('/history')
+def clear_history(confirm:bool=False):
+    if not confirm:raise HTTPException(400,'ต้องยืนยันก่อนล้างประวัติ Import / Export')
+    with service().db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        backfill_registry(c)
+        imports=c.execute('SELECT COUNT(*) FROM import_registry').fetchone()[0]
+        exports=c.execute('SELECT COUNT(*) FROM export_history').fetchone()[0]
+        for batch_id,body in c.execute('SELECT id,body FROM batches').fetchall():
+            batch=json.loads(body)
+            for f in batch['files']:f['history_cleared']=True
+            c.execute('UPDATE batches SET body=? WHERE id=?',(json.dumps(batch,ensure_ascii=False),batch_id))
+        c.execute('DELETE FROM import_registry')
+        c.execute('DELETE FROM export_history')
+    return dict(cleared_imports=imports,cleared_exports=exports)
+
+
+def history_page(table, page, size, batch_id=''):
+    # Table is selected internally by the two history routes, never from input.
+    where=" WHERE json_extract(body, '$.batch_id')=?" if batch_id else ''
+    args=(batch_id,) if batch_id else ()
+    with service().db() as c:
+        c.execute('BEGIN')
+        total=c.execute(f'SELECT COUNT(*) FROM {table}'+where,args).fetchone()[0]
+        pages=max(1,(total+size-1)//size)
+        page=min(page,pages)
+        rows=[json.loads(body) for body, in c.execute(
+            f'SELECT body FROM {table}'+where+' ORDER BY rowid DESC LIMIT ? OFFSET ?',
+            (*args,size,(page-1)*size))]
+    return dict(rows=rows,total=total,page=page,size=size,pages=pages)
+
+
 @router.get('/import-history')
-def import_history():
+def import_history(page:int|None=Query(None,ge=1),size:int=Query(20,ge=1,le=100)):
     with service().db() as c:backfill_registry(c)
-    active = {f['id'] for b in json_rows('batches') for f in b['files'] if service().storage().exists(f['path'])}
-    return [dict(r, source_available=r['id'] in active) for r in json_rows('import_registry')[:500]]
+    result=history_page('import_registry',page or 1,size if page is not None else 500)
+    # Check availability only for batches represented on this page.
+    ids={r['batch_id'] for r in result['rows']}
+    active=set()
+    if ids:
+        with service().db() as c:
+            bodies=c.execute('SELECT body FROM batches WHERE id IN ('+','.join('?' for _ in ids)+')',tuple(ids)).fetchall()
+        active={f['id'] for body, in bodies for f in json.loads(body)['files'] if service().storage().exists(f['path'])}
+    result['rows']=[dict(r,source_available=r['id'] in active) for r in result['rows']]
+    return result if page is not None else result['rows']
+
 
 @router.get('/export-history')
-def export_history(batch_id:str=''):
-    return [r for r in json_rows('export_history') if not batch_id or r['batch_id']==batch_id][:200]
+def export_history(batch_id:str='',page:int|None=Query(None,ge=1),size:int=Query(20,ge=1,le=100)):
+    result=history_page('export_history',page or 1,size if page is not None else 200,batch_id)
+    return result if page is not None else result['rows']
 
 @router.get('/export-history/{export_id}/file')
 def export_file(export_id:str):

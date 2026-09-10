@@ -76,10 +76,15 @@ w=openpyxl.load_workbook(OUT/'audited-export.xlsx',data_only=True);grouped=defau
 for r in allrows:
  assert r['status']=='ready',(r['customer'],r['line'],r['errors'])
  t=grouped[r['sku']];t[0]+=num(r['qty']);t[1]+=cents(num(r['gross']));t[2]+=num(r['calculated_net'])
+export_rounding_delta=D(0)
+merged_by_sku={r['sku']:r for r in merged}
 for sku,p,q,d in w.active.iter_rows(min_row=2,values_only=True):
  factor=D(1)
  for part in d.split('+'):factor*=1-num(part.rstrip('%'))/100
- assert [num(q),cents(num(p)*num(q)),cents(num(p)*num(q)*factor)]==grouped[sku],sku
+ expected_discount='+'.join(f'{cents(num(part.rstrip("%"))):.2f}%' for part in merged_by_sku[sku]['discount'].split('+'))
+ assert d==expected_discount,(sku,d,expected_discount)
+ assert [num(q),cents(num(p)*num(q))]==grouped[sku][:2],sku
+ export_rounding_delta+=cents(num(p)*num(q)*factor)-grouped[sku][2]
 assert w.active.max_row==len(grouped)+1;w.close()
 book=openpyxl.Workbook();ws=book.active;ws.title='Source reconciliation';ws.append(['Source','Branch','Source row','SKU','Qty','Sale unit','Cost unit source','Sale total','Cost total source','Settlement total source','Calculated settlement','Delta if discount rounded 2dp','Cost origin'])
 for line in checks:ws.append(line)
@@ -87,3 +92,5 @@ ws.freeze_panes='A2';ws.auto_filter.ref=ws.dimensions
 book.save(OUT/'all-rows-reconciliation.xlsx')
 result=dict(sources=reports,rows=len(allrows),sku_rows=len(merged),branch_groups=sum(g['branches'] for g in state['groups']),checks='All source detail, control totals, branch totals and reconstructed Excel SKU amounts passed',merged_totals={k:state[k] for k in ('merged_qty','merged_gross','merged_net')})
 (OUT/'audit.json').write_text(json.dumps(result,ensure_ascii=False,indent=2));print(json.dumps(result,ensure_ascii=False,indent=2))
+
+print('Export net delta from two-decimal discounts:', export_rounding_delta)

@@ -12,6 +12,7 @@ test('configure XLSX → valuation → duplicate audit → export history → ba
  await expect(page.getByLabel('ชีตรูปแบบใหม่')).toHaveValue('Sales');
  for(const [field,column] of Object.entries({sku:'A',qty:'B',price:'C',cost_price:'D',gross:'E',cost_total:'F'}))await page.getByLabel('คอลัมน์ '+field,{exact:true}).selectOption(column);
  await page.getByLabel('ลูกค้ารูปแบบใหม่').fill('Custom Shop');
+ await page.getByLabel('แหล่งยอดสุทธิรูปแบบใหม่').selectOption('cost');
  await page.getByRole('button',{name:'ดูตัวอย่าง Mapping',exact:true}).click();
  await expect(page.locator('.ops-preview-result')).toContainText('อ่าน 1 รายการ · พร้อม 1');
  await page.screenshot({path:'_wrx-output/evidence/operations-profile-preview.png',fullPage:true});
@@ -55,5 +56,19 @@ test('configure XLSX → valuation → duplicate audit → export history → ba
  await expect(page.getByRole('link',{name:'ดาวน์โหลดสำรองก่อนกู้คืนครั้งล่าสุด'})).toBeVisible();
  await page.screenshot({path:'_wrx-output/evidence/operations-restored.png',fullPage:true});
  await page.setViewportSize({width:390,height:844});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);
+ await page.getByRole('button',{name:'ประวัติ Import / Export',exact:true}).click();
+ const clear=page.getByRole('button',{name:'ล้างประวัติ Import / Export',exact:true});
+ await expect(clear).toBeEnabled();
+ page.once('dialog',d=>d.dismiss());await clear.click();
+ expect((await (await request.get('/api/export-history')).json()).length).toBe(2);
+ page.once('dialog',d=>d.accept());await clear.click();
+ await expect(page.locator('.operations-panel [role=status]')).toContainText('ล้างประวัติแล้ว');
+ await expect(page.getByText('ยังไม่มีประวัติ Export',{exact:true})).toBeVisible();
+ await expect(page.getByText('ยังไม่มีประวัติ Import',{exact:true})).toBeVisible();
+ expect((await (await request.get(`/api/batches/${b.id}/rows`)).json()).total).toBe(1);
+ await page.reload();
+ await page.getByRole('button',{name:'ตั้งค่า / ประวัติ',exact:true}).click();
+ await page.getByRole('button',{name:'ประวัติ Import / Export',exact:true}).click();
+ await expect(page.getByText('ยังไม่มีประวัติ Import',{exact:true})).toBeVisible();
  await request.delete('/api/batches'); // Isolated test DB only; next workflow starts empty.
 });

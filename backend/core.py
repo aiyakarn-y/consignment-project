@@ -56,6 +56,18 @@ def discount_text(text):
     return '+'.join(fmt(dec(p.strip().rstrip('%'))) + '%' for p in str(text).split('+'))
 
 
+def export_discount(text):
+    """Excel's text Discount column uses two decimals per sequential component."""
+    percent(text)
+    return '+'.join(f"{dec(part.strip().rstrip('%')).quantize(CENT, rounding=ROUND_HALF_UP):.2f}%"
+                    for part in str(text).split('+'))
+
+
+def export_net(r):
+    return money(dec(str(float(dec(r['price'])))) * dec(str(float(dec(r['qty']))))
+                 * percent(export_discount(r['discount'])))
+
+
 def reverse_discount(price, net):
     if price is None or net is None or price == 0:
         return None
@@ -283,78 +295,100 @@ def validate(r):
     return r
 
 
-def parse_xlsx(path, name):
-    wb = openpyxl.load_workbook(path, data_only=True)
-    out = []
+def sheet_kind(ws):
+    if str(ws['A1'].value).strip()=='รหัสร้านค้า' and str(ws['G1'].value).strip()=='รหัสสาขา':return 'Big C'
+    if ws['C3'].value=='รหัสสินค้า' and 'ยอดขาย' in str(ws['E3'].value):return 'Outlet G624'
+    if 'REFERENCE' in str(ws['C2'].value) and 'QTY' in str(ws['F2'].value):return 'KING POWER'
+    if str(ws['B6'].value).strip()=='BARCODE EAN13':return 'Outcast'
+    return ''
+
+
+def parse_xlsx(path, name, sheets=None):
+    wb=openpyxl.load_workbook(path,data_only=True)
+    try:
+        if len(wb.sheetnames)==1 and [wb.active.cell(1,c).value for c in range(1,5)]==['Items','Price','Qty','Discount']:
+            raise ValueError('ไฟล์รูปแบบแม่แบบ: ใช้รายงานขายต้นทางแทนไฟล์ Export')
+        candidates=[ws.title for ws in wb if sheet_kind(ws)]
+        if sheets is None and len(candidates)>1:
+            raise ValueError('พบหลายชีตข้อมูล กรุณาเลือกชีตที่ต้องการนำเข้าก่อน: '+', '.join(candidates))
+        selected=candidates if sheets is None else sheets
+        if not selected or len(selected)!=len(set(selected)) or any(n not in candidates for n in selected):
+            raise ValueError('เลือกชีตข้อมูลที่รองรับอย่างน้อยหนึ่งชีตโดยไม่ซ้ำ')
+        rows=[];kinds=[]
+        for name_in_book in selected:
+            parsed,kind=parse_xlsx_sheet(wb,wb[name_in_book],name)
+            if not parsed:raise ValueError('ไม่พบรายการในชีตที่เลือก: '+name_in_book)
+            rows.extend(parsed)
+            if kind not in kinds:kinds.append(kind)
+        return rows,' / '.join(kinds)
+    finally:wb.close()
+
+
+def parse_xlsx_sheet(wb, ws, name):
+    out=[]
     def raw(ws, idx):
         return {c.column_letter: str(c.value) for c in ws[idx] if c.value is not None}
-    try:
-        if len(wb.sheetnames) == 1 and [wb.active.cell(1,c).value for c in range(1,5)] == ['Items','Price','Qty','Discount']:
-            raise ValueError('ไฟล์รูปแบบแม่แบบ: ใช้ช่องอัปโหลดรายงาน 5 รูปแบบ; ไม่นำแถวตัวอย่างมารวมยอด')
-        detail = next((ws for ws in wb if str(ws['A1'].value).strip() == 'รหัสร้านค้า' and str(ws['G1'].value).strip() == 'รหัสสาขา'), None)
-        if detail is not None:
-            names = {}
-            for ws in wb:
-                if ws.title == 'Sheet3':
-                    for vals in ws.iter_rows(min_row=4, values_only=True):
-                        if len(vals)>3 and code(vals[1]).isdigit() and vals[3] and not str(vals[3]).startswith('#'):
-                            names[code(vals[1])] = str(vals[3]).strip()
-            for i in range(2, detail.max_row+1):
-                c = [detail.cell(i,j).value for j in range(1,21)]
-                if c[0] is None:
-                    continue
-                if not code(c[0]).isdigit():
-                    raise ValueError(f'แถว {i} ไม่ตรงรูปแบบรายละเอียด Big C')
-                sku = code(c[3])
-                if sku.startswith('#'):
-                    sku = ''
-                notes = ['SKU จากค่าที่ Excel บันทึกไว้; ไม่คำนวณลิงก์ workbook ภายนอกใหม่']
-                if str(c[8]).endswith('07-2026'):
-                    notes.append('วันที่กรกฎาคมในรายงานสิงหาคม: คงตามต้นทาง')
-                out.append(row(name, detail.title, i, 'Big C', names.get(code(c[6]), code(c[7])), sku,
-                    c[10], c[13], c[9], c[12], c[19], c[2], c[4], 'รวม VAT ตามปลีก (invat)',
-                    str(c[8]), notes, raw(detail,i)))
-                out[-1]['branch_code'] = code(c[6])
-            return out, 'Big C'
+    detail = ws if sheet_kind(ws)=='Big C' else None
+    if detail is not None:
+        names = {}
         for ws in wb:
-            if ws['C3'].value == 'รหัสสินค้า' and 'ยอดขาย' in str(ws['E3'].value):
-                for i in range(5,ws.max_row+1):
-                    if not ws.cell(i,3).value or str(ws.cell(i,1).value).lower().startswith('grand'):
-                        continue
-                    for j in range(5,16):
-                        q, g = dec(ws.cell(i,j).value), dec(ws.cell(i,j+12).value)
-                        if not q and not g:
-                            continue
-                        out.append(row(name,ws.title,i,'Outlet G624',str(ws.cell(4,j).value),sku_in(ws.cell(i,4).value),
-                            q,gross=g,partner=ws.cell(i,3).value,
-                            notes=['SKU แยกจากชื่อสินค้า','ต้นทางไม่ระบุ GP: ใช้ค่าเริ่มต้น 0% และแก้ไขได้'],raw=raw(ws,i)))
-                        out[-1]['source_columns'] = f'{openpyxl.utils.get_column_letter(j)}/{openpyxl.utils.get_column_letter(j+12)}'
-                return out,'Outlet G624'
-            if 'REFERENCE' in str(ws['C2'].value) and 'QTY' in str(ws['F2'].value):
-                for i in range(4,ws.max_row+1):
-                    if not code(ws.cell(i,1).value).isdigit():
-                        continue
-                    out.append(row(name,ws.title,i,'KING POWER','ไม่ระบุสาขา',code(ws.cell(i,3).value),
-                        ws.cell(i,6).value,ws.cell(i,4).value,gross=ws.cell(i,7).value,net=ws.cell(i,9).value,
-                        partner=ws.cell(i,1).value,
-                        notes=['ใช้ส่วนต่างรวมราคา/ต้นทุน; ไม่ใช้ MG% เป็น GP และไม่ถอด VAT ซ้ำ'],raw=raw(ws,i)))
-                return out,'KING POWER'
-            if str(ws['B6'].value).strip() == 'BARCODE EAN13':
-                branch = 'ไม่ระบุสาขา'
-                for i in range(7,ws.max_row+1):
-                    a,b = ws.cell(i,1).value,ws.cell(i,2).value
-                    if a and not b:
-                        branch = str(a)
-                    if not b:
-                        continue
-                    gp = ws.cell(i,6).value
-                    out.append(row(name,ws.title,i,'Outcast',branch,'',ws.cell(i,9).value,ws.cell(i,7).value,
-                        gp,ws.cell(i,10).value,ws.cell(i,11).value,b,a,
-                        'ยอดหลัง GP ระบุ Inc. Vat; Retail Price ไม่ระบุโดยตรง',notes=['ใช้รหัสสินค้าอ้างอิงต้นทางเมื่อไม่มี SKU; แก้ไขภายหลังได้'],raw=raw(ws,i)))
-                return out,'Outcast'
-        raise ValueError('ยังไม่รองรับรูปแบบ Excel นี้ กรุณาใช้รายงานรูปแบบเดียวกับชุดตัวอย่าง')
-    finally:
-        wb.close()
+            if ws.title == 'Sheet3':
+                for vals in ws.iter_rows(min_row=4, values_only=True):
+                    if len(vals)>3 and code(vals[1]).isdigit() and vals[3] and not str(vals[3]).startswith('#'):
+                        names[code(vals[1])] = str(vals[3]).strip()
+        for i in range(2, detail.max_row+1):
+            c = [detail.cell(i,j).value for j in range(1,21)]
+            if c[0] is None:
+                continue
+            if not code(c[0]).isdigit():
+                raise ValueError(f'แถว {i} ไม่ตรงรูปแบบรายละเอียด Big C')
+            sku = code(c[3])
+            if sku.startswith('#'):
+                sku = ''
+            notes = ['SKU จากค่าที่ Excel บันทึกไว้; ไม่คำนวณลิงก์ workbook ภายนอกใหม่']
+            if str(c[8]).endswith('07-2026'):
+                notes.append('วันที่กรกฎาคมในรายงานสิงหาคม: คงตามต้นทาง')
+            out.append(row(name, detail.title, i, 'Big C', names.get(code(c[6]), code(c[7])), sku,
+                c[10], c[13], c[9], c[12], c[19], c[2], c[4], 'รวม VAT ตามปลีก (invat)',
+                str(c[8]), notes, raw(detail,i)))
+            out[-1]['branch_code'] = code(c[6])
+        return out, 'Big C'
+    if ws['C3'].value == 'รหัสสินค้า' and 'ยอดขาย' in str(ws['E3'].value):
+        for i in range(5,ws.max_row+1):
+            if not ws.cell(i,3).value or str(ws.cell(i,1).value).lower().startswith('grand'):
+                continue
+            for j in range(5,16):
+                q, g = dec(ws.cell(i,j).value), dec(ws.cell(i,j+12).value)
+                if not q and not g:
+                    continue
+                out.append(row(name,ws.title,i,'Outlet G624',str(ws.cell(4,j).value),sku_in(ws.cell(i,4).value),
+                    q,gross=g,partner=ws.cell(i,3).value,
+                    notes=['SKU แยกจากชื่อสินค้า','ต้นทางไม่ระบุ GP: ใช้ค่าเริ่มต้น 0% และแก้ไขได้'],raw=raw(ws,i)))
+                out[-1]['source_columns'] = f'{openpyxl.utils.get_column_letter(j)}/{openpyxl.utils.get_column_letter(j+12)}'
+        return out,'Outlet G624'
+    if 'REFERENCE' in str(ws['C2'].value) and 'QTY' in str(ws['F2'].value):
+        for i in range(4,ws.max_row+1):
+            if not code(ws.cell(i,1).value).isdigit():
+                continue
+            out.append(row(name,ws.title,i,'KING POWER','ไม่ระบุสาขา',code(ws.cell(i,3).value),
+                ws.cell(i,6).value,ws.cell(i,4).value,gross=ws.cell(i,7).value,net=ws.cell(i,9).value,
+                partner=ws.cell(i,1).value,
+                notes=['ใช้ส่วนต่างรวมราคา/ต้นทุน; ไม่ใช้ MG% เป็น GP และไม่ถอด VAT ซ้ำ'],raw=raw(ws,i)))
+        return out,'KING POWER'
+    if str(ws['B6'].value).strip() == 'BARCODE EAN13':
+        branch = 'ไม่ระบุสาขา'
+        for i in range(7,ws.max_row+1):
+            a,b = ws.cell(i,1).value,ws.cell(i,2).value
+            if a and not b:
+                branch = str(a)
+            if not b:
+                continue
+            gp = ws.cell(i,6).value
+            out.append(row(name,ws.title,i,'Outcast',branch,'',ws.cell(i,9).value,ws.cell(i,7).value,
+                gp,ws.cell(i,10).value,ws.cell(i,11).value,b,a,
+                'ยอดหลัง GP ระบุ Inc. Vat; Retail Price ไม่ระบุโดยตรง',notes=['ใช้รหัสสินค้าอ้างอิงต้นทางเมื่อไม่มี SKU; แก้ไขภายหลังได้'],raw=raw(ws,i)))
+        return out,'Outcast'
+    raise ValueError('ยังไม่รองรับรูปแบบ Excel นี้ กรุณาใช้รายงานรูปแบบเดียวกับชุดตัวอย่าง')
 
 
 def parse_pdf(path,name):
@@ -384,11 +418,11 @@ def parse_pdf(path,name):
     return out,'PDF ส่งเงินคืน'
 
 
-def parse(path,name):
+def parse(path,name,sheets=None):
     if name.lower().endswith('.pdf'):
         rows,kind=parse_pdf(path,name)
     elif name.lower().endswith('.xlsx'):
-        rows,kind=parse_xlsx(path,name)
+        rows,kind=parse_xlsx(path,name,sheets=sheets)
     else:
         raise ValueError('รองรับ .xlsx และ .pdf เท่านั้น')
     if not rows:
@@ -452,6 +486,8 @@ def export_xlsx(rows,template,path):
         raise ValueError('ต้องแก้รายการที่ไม่พร้อมทั้งหมดก่อน export')
     wb=openpyxl.load_workbook(template)
     ws=wb['Sample']
+    for column, title in enumerate(('Items', 'Price', 'Qty', 'Discount'), 1):
+        ws.cell(1, column, title)
     styles=[copy(ws.cell(2,c)._style) for c in range(1,5)]
     height=ws.row_dimensions[2].height
     ws.delete_rows(2,ws.max_row)
@@ -460,7 +496,7 @@ def export_xlsx(rows,template,path):
         exported=dict(r,price=str(float(dec(r['price']))),qty=str(float(dec(r['qty']))))
         if validate(exported)['errors']:
             raise ValueError('ความละเอียดตัวเลขใน Excel ทำให้ยอดคลาดเคลื่อน')
-        values=[r['sku'],float(dec(r['price'])),float(dec(r['qty'])),r['discount']]
+        values=[r['sku'],float(dec(r['price'])),float(dec(r['qty'])),export_discount(r['discount'])]
         for c,value in enumerate(values,1):
             cell=ws.cell(i,c,value);cell._style=copy(styles[c-1])
             if c in (1,4): cell.data_type='s'

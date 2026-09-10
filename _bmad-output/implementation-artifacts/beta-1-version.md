@@ -1,0 +1,2 @@
+# Beta 1 version — Path A
+Set application release version to 0.3.0-beta.1 in root/frontend package metadata, frontend lockfile root entry, backend APP_VERSION and FastAPI/health. UI reads version from frontend package metadata and shows BETA 1 with Local environment. README updated. Dependencies and business behavior unchanged. Build, typecheck, isolated health/version and generated HTML checks passed; evidence under _wrx-output/evidence/beta-1. No release published or deployed.
