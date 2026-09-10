@@ -419,6 +419,8 @@ def parse_pdf(path,name):
 
 
 def parse(path,name,sheets=None):
+    if name.lower().endswith('.csv'):
+        raise ValueError('CSV ต้องเลือกรูปแบบนำเข้า: สร้าง Mapping จากไฟล์ตัวอย่างในเมนูรูปแบบนำเข้า แล้วเลือกรูปแบบที่บันทึกไว้')
     if name.lower().endswith('.pdf'):
         rows,kind=parse_pdf(path,name)
     elif name.lower().endswith('.xlsx'):

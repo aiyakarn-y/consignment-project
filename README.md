@@ -118,3 +118,5 @@ Credentials stay in ignored `.env.beta`. Beta uses `data/beta-test/` and backend
 Use `npm run beta:status` and `npm run beta:stop` (or Ctrl+C in its terminal). Stop Beta before changing `.env.beta`, then restart.
 
 To share after checking the password prompt locally, run `cloudflared tunnel --url http://localhost:3119` in another terminal. This is a public HTTPS tunnel; keep the password private, use test data, and keep the Mac awake. Stop the tunnel with Ctrl+C first when finished. All testers share one dataset; coordinate edits. Closing a browser/private session clears its cached Basic login; there is no in-app logout or individual user account yet. No tunnel starts automatically.
+
+นำเข้ารายงาน CSV ผ่านรูปแบบ Mapping ที่บันทึกไว้: [คู่มือ CSV](docs/csv-import.md)

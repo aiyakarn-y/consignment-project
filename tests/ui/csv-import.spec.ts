@@ -1,0 +1,30 @@
+import {test,expect} from '../../frontend/node_modules/@playwright/test';
+
+test('CSV mapping preserves leading-zero SKU and exports Excel',async({page,request})=>{
+ const file={name:'sales.csv',mimeType:'text/csv',buffer:Buffer.from('\uFEFFSKU,Qty,Price\r\n001234,2,107\r\n')};
+ await page.goto('/');
+ await page.getByRole('button',{name:'ตั้งค่า / ประวัติ',exact:true}).click();
+ await page.getByLabel('ชื่อรูปแบบนำเข้า').fill('CSV E2E');
+ await page.getByLabel('ไฟล์ตัวอย่างรูปแบบใหม่').setInputFiles(file);
+ await page.getByRole('button',{name:'อ่านชีตและหัวตาราง',exact:true}).click();
+ await expect(page.getByLabel('ชีตรูปแบบใหม่')).toHaveValue('CSV');
+ for(const [field,column] of Object.entries({sku:'A',qty:'B',price:'C'}))await page.getByLabel('คอลัมน์ '+field,{exact:true}).selectOption(column);
+ await page.getByLabel('ลูกค้ารูปแบบใหม่').fill('CSV Shop');
+ await page.getByRole('button',{name:'ดูตัวอย่าง Mapping',exact:true}).click();
+ await expect(page.locator('.ops-preview-result')).toContainText('อ่าน 1 รายการ · พร้อม 1');
+ await page.getByRole('button',{name:'บันทึกรูปแบบ',exact:true}).click();
+ await expect(page.locator('.operations-panel [role=status]')).toContainText('บันทึกรูปแบบ CSV E2E');
+ const profiles=await (await request.get('/api/profiles')).json();
+ const profile=profiles.find((p:{config:{name:string}})=>p.config.name==='CSV E2E');
+ await page.getByLabel('รูปแบบสำหรับ Import').selectOption(profile.id);
+ await page.getByLabel('อัปโหลดรายงาน').setInputFiles(file);
+ await expect(page.locator('.main-content>.notice')).toContainText('นำเข้าสำเร็จ');
+ const batches=await (await request.get('/api/batches')).json();
+ const rows=await (await request.get(`/api/batches/${batches[0].id}/rows`)).json();
+ expect(rows.rows[0].sku).toBe('001234');
+ const pending=page.waitForEvent('download');
+ await page.getByRole('button',{name:'Export Excel',exact:true}).click();
+ const download=await pending;expect(download.suggestedFilename()).toMatch(/\.xlsx$/);
+ expect(await download.failure()).toBeNull();
+ await request.delete('/api/batches');
+});

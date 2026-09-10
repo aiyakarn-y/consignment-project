@@ -8,8 +8,8 @@ import fcntl
 from contextlib import contextmanager
 from typing import Protocol
 
-LEGACY_ASSET = re.compile(r'[0-9a-f]{32}\.(?:xlsx|pdf)')
-ASSET = re.compile(r'(?:imports/[0-9a-f]{32}/[0-9a-f]{32}\.(?:xlsx|pdf)|exports/[0-9a-f]{32}\.xlsx|[0-9a-f]{32}\.(?:xlsx|pdf))')
+LEGACY_ASSET = re.compile(r'[0-9a-f]{32}\.(?:xlsx|pdf|csv)')
+ASSET = re.compile(r'(?:imports/[0-9a-f]{32}/[0-9a-f]{32}\.(?:xlsx|pdf|csv)|exports/[0-9a-f]{32}\.xlsx|[0-9a-f]{32}\.(?:xlsx|pdf|csv))')
 
 
 class FileStore(Protocol):
