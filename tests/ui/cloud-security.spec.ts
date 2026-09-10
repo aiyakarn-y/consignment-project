@@ -2,6 +2,31 @@ import { test, expect } from '../../frontend/node_modules/@playwright/test';
 import { createHmac } from 'node:crypto';
 import { GET as download } from '../../frontend/app/cloud-download/route';
 import { POST as uploadToken } from '../../frontend/app/cloud-storage/route';
+import { requireBetaAuth } from '../../frontend/lib/beta-auth';
+
+test('Vercel login can be disabled explicitly while download tickets remain required', async () => {
+  const names = ['VERCEL', 'CONSIGN_BETA_MODE', 'CONSIGN_BETA_PASSWORD', 'CONSIGN_STORAGE_DRIVER', 'CONSIGN_BLOB_PREFIX', 'BLOB_READ_WRITE_TOKEN'];
+  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  try {
+    process.env.VERCEL = '1';
+    Object.assign(process.env, {CONSIGN_STORAGE_DRIVER: 'vercel_blob', CONSIGN_BLOB_PREFIX: 'test', BLOB_READ_WRITE_TOKEN: 'vercel_blob_rw_TestStore_fixture'});
+    delete process.env.CONSIGN_BETA_PASSWORD;
+    const request = new Request('http://localhost/cloud-download?ticket=invalid');
+    for (const mode of ['1', 'invalid', undefined]) {
+      if (mode === undefined) delete process.env.CONSIGN_BETA_MODE;
+      else process.env.CONSIGN_BETA_MODE = mode;
+      expect(requireBetaAuth(request)?.status).toBe(503);
+    }
+    process.env.CONSIGN_BETA_MODE = '0';
+    expect(requireBetaAuth(request)).toBeNull();
+    expect((await download(request)).status).toBe(403);
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
+});
 
 test('cloud handlers independently reject missing credentials and invalid download tickets', async () => {
   const names=['CONSIGN_BETA_MODE','CONSIGN_BETA_PASSWORD','CONSIGN_STORAGE_DRIVER','CONSIGN_BLOB_PREFIX','BLOB_READ_WRITE_TOKEN'];

@@ -8,6 +8,28 @@ import pytest
 from backend.beta_auth import install_beta_auth
 
 
+@pytest.mark.parametrize('mode,status', [('0', 200), ('1', 503), (None, 503), ('invalid', 503)])
+def test_vercel_auth_can_be_explicitly_disabled(monkeypatch, mode, status):
+    monkeypatch.setenv('VERCEL', '1')
+    monkeypatch.delenv('CONSIGN_BETA_PASSWORD', raising=False)
+    if mode is None:
+        monkeypatch.delenv('CONSIGN_BETA_MODE', raising=False)
+    else:
+        monkeypatch.setenv('CONSIGN_BETA_MODE', mode)
+    app = FastAPI()
+
+    @app.get('/api/health')
+    def health():
+        return {'ok': True}
+
+    install_beta_auth(app)
+    with TestClient(app) as client:
+        response = client.get('/api/health')
+        assert response.status_code == status
+        if status == 200:
+            assert response.headers['cache-control'] == 'no-store'
+
+
 def test_beta_auth_covers_destructive_and_download_routes(monkeypatch):
     monkeypatch.setenv('CONSIGN_BETA_MODE', '1')
     monkeypatch.setenv('CONSIGN_BETA_PASSWORD', 'test-password-123')
