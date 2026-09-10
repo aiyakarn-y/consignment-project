@@ -72,7 +72,9 @@ class BlobFileStore:
 
     def read_version(self, key):
         path = self.key(key)
-        response = self.request('GET', f'https://{self.store_id}.private.blob.vercel-storage.com/{quote(path, safe="/")}', params={'cache': '0'}, max_bytes=64*1024*1024 if key == 'state/system.json' else 260*1024*1024)
+        # Conditional writes need the stored representation's validator, not a
+        # weak/variant ETag produced by delivery compression. Keep reads uncached.
+        response = self.request('GET', f'https://{self.store_id}.private.blob.vercel-storage.com/{quote(path, safe="/")}', params={'cache': '0'}, headers={'Accept-Encoding': 'identity'}, max_bytes=64*1024*1024 if key == 'state/system.json' else 260*1024*1024)
         if response.status_code == 404: return None, None
         etag = response.headers.get('etag')
         if not etag: raise OSError('Blob response missing ETag; refusing unsafe writes')
