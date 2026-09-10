@@ -22,24 +22,23 @@ def service():
 def now():return datetime.now(timezone.utc).isoformat()
 def digest(data):return hashlib.sha256(data).hexdigest()
 def json_rows(table):
-    with service().db() as c:return [json.loads(x[0]) for x in c.execute(f'SELECT body FROM {table} ORDER BY rowid DESC')]
+    with service().repository() as repo: return [body for _, body in repo.items(table, reverse=True)]
 def put(table,key,body):
-    with service().db() as c:c.execute(f'INSERT OR REPLACE INTO {table} VALUES (?,?)',(key,json.dumps(body,ensure_ascii=False)))
+    with service().repository() as repo: repo.put(table,key,body)
 def get_profile(key):
-    with service().db() as c:r=c.execute('SELECT body FROM profiles WHERE id=?',(key,)).fetchone()
-    if not r:raise HTTPException(404,'ไม่พบรูปแบบนำเข้า')
-    return json.loads(r[0])
+    with service().repository() as repo: body=repo.get('profiles',key)
+    if body is None: raise HTTPException(404,'ไม่พบรูปแบบนำเข้า')
+    return body
 def valuation_for(customer):
-    with service().db() as c:r=c.execute('SELECT body FROM valuations WHERE id=?',(customer,)).fetchone()
-    return json.loads(r[0])['settings'] if r else None
+    with service().repository() as repo: body=repo.get('valuations',customer)
+    return body['settings'] if body else None
 
-def backfill_registry(c):
-    for body, in c.execute('SELECT body FROM batches').fetchall():
-        b=json.loads(body)
+def backfill_registry(repo):
+    for _, b in repo.items('batches'):
         for f in b['files']:
             if f.get('history_cleared'):continue
             r=dict(id=f['id'],hash=f['hash'],name=f['name'],batch_id=b['id'],period=b['period'],at=f.get('imported_at',b['created']),duplicate_override=f.get('duplicate_override',False),error=f.get('error'))
-            c.execute('INSERT OR IGNORE INTO import_registry VALUES (?,?)',(f['id'],json.dumps(r,ensure_ascii=False)))
+            repo.put('import_registry',f['id'],r,ignore=True)
 
 
 def duplicate_matches(content_hash,exclude_batch=''):
@@ -96,9 +95,9 @@ def set_valuation(payload:dict):
             if r['customer']==customer:
                 previous=r.get('valuation');r['valuation']=deepcopy(settings)
                 r.setdefault('edits',[]).append(dict(at=now(),before={'valuation':previous},after={'valuation':settings}));validate(r);count+=1
-    with service().db() as c:
-        c.execute('INSERT OR REPLACE INTO valuations VALUES (?,?)',(customer,json.dumps(body,ensure_ascii=False)))
-        if batch:c.execute('INSERT OR REPLACE INTO batches VALUES (?,?)',(batch['id'],json.dumps(batch,ensure_ascii=False)))
+    with service().repository() as repo:
+        repo.put('valuations',customer,body)
+        if batch:repo.put('batches',batch['id'],batch)
     return dict(updated=count,settings=body)
 
 @router.post('/batches/{batch_id}/check-upload')
@@ -120,46 +119,45 @@ def check_upload(batch_id:str,files:list[UploadFile],profile_id:str=Form('')):
 @router.delete('/history')
 def clear_history(confirm:bool=False):
     if not confirm:raise HTTPException(400,'ต้องยืนยันก่อนล้างประวัติ Import / Export')
-    with service().db() as c:
-        c.execute('BEGIN IMMEDIATE')
-        backfill_registry(c)
-        imports=c.execute('SELECT COUNT(*) FROM import_registry').fetchone()[0]
-        exports=c.execute('SELECT COUNT(*) FROM export_history').fetchone()[0]
-        for batch_id,body in c.execute('SELECT id,body FROM batches').fetchall():
-            batch=json.loads(body)
+    with service().repository() as repo:
+        backfill_registry(repo)
+        imports=len(repo.items('import_registry'))
+        exports=len(repo.items('export_history'))
+        for batch_id,batch in repo.items('batches'):
             for f in batch['files']:f['history_cleared']=True
-            c.execute('UPDATE batches SET body=? WHERE id=?',(json.dumps(batch,ensure_ascii=False),batch_id))
-        c.execute('DELETE FROM import_registry')
-        c.execute('DELETE FROM export_history')
+            repo.put('batches',batch_id,batch)
+        repo.clear('import_registry')
+        repo.clear('export_history')
     return dict(cleared_imports=imports,cleared_exports=exports)
 
 
 def history_page(table, page, size, batch_id=''):
-    # Table is selected internally by the two history routes, never from input.
-    where=" WHERE json_extract(body, '$.batch_id')=?" if batch_id else ''
-    args=(batch_id,) if batch_id else ()
-    with service().db() as c:
-        c.execute('BEGIN')
-        total=c.execute(f'SELECT COUNT(*) FROM {table}'+where,args).fetchone()[0]
-        pages=max(1,(total+size-1)//size)
-        page=min(page,pages)
-        rows=[json.loads(body) for body, in c.execute(
-            f'SELECT body FROM {table}'+where+' ORDER BY rowid DESC LIMIT ? OFFSET ?',
-            (*args,size,(page-1)*size))]
+    # Keep database-level paging for the SQLite adapter; JSON Beta pages a snapshot.
+    if service().STATE_DRIVER == 'sqlite':
+        where=" WHERE json_extract(body, '$.batch_id')=?" if batch_id else ''
+        args=(batch_id,) if batch_id else ()
+        with service().db() as c:
+            c.execute('BEGIN')
+            total=c.execute(f'SELECT COUNT(*) FROM {table}'+where,args).fetchone()[0]
+            pages=max(1,(total+size-1)//size);page=min(page,pages)
+            rows=[json.loads(body) for body, in c.execute(f'SELECT body FROM {table}'+where+' ORDER BY rowid DESC LIMIT ? OFFSET ?',(*args,size,(page-1)*size))]
+    else:
+        rows=[r for r in json_rows(table) if not batch_id or r.get('batch_id')==batch_id]
+        total=len(rows);pages=max(1,(total+size-1)//size);page=min(page,pages)
+        rows=rows[(page-1)*size:page*size]
     return dict(rows=rows,total=total,page=page,size=size,pages=pages)
 
 
 @router.get('/import-history')
 def import_history(page:int|None=Query(None,ge=1),size:int=Query(20,ge=1,le=100)):
-    with service().db() as c:backfill_registry(c)
+    with service().repository() as repo:backfill_registry(repo)
     result=history_page('import_registry',page or 1,size if page is not None else 500)
     # Check availability only for batches represented on this page.
     ids={r['batch_id'] for r in result['rows']}
     active=set()
     if ids:
-        with service().db() as c:
-            bodies=c.execute('SELECT body FROM batches WHERE id IN ('+','.join('?' for _ in ids)+')',tuple(ids)).fetchall()
-        active={f['id'] for body, in bodies for f in json.loads(body)['files'] if service().storage().exists(f['path'])}
+        with service().repository() as repo: bodies=[repo.get('batches',key) for key in ids]
+        active={f['id'] for body in bodies if body for f in body['files'] if service().storage().exists(f['path'])}
     result['rows']=[dict(r,source_available=r['id'] in active) for r in result['rows']]
     return result if page is not None else result['rows']
 
@@ -173,21 +171,17 @@ def export_history(batch_id:str='',page:int|None=Query(None,ge=1),size:int=Query
 def export_file(export_id:str):
     r=next((r for r in json_rows('export_history') if r['id']==export_id),None)
     if not r:raise HTTPException(404,'ไม่พบประวัติ Export')
-    path=service().storage().path(r['path'])
-    if not path.is_file():raise HTTPException(404,'ไม่พบไฟล์ Export ที่บันทึกไว้')
-    return FileResponse(path,filename=r['filename'])
+    if not service().storage().exists(r['path']):raise HTTPException(404,'ไม่พบไฟล์ Export ที่บันทึกไว้')
+    return service().storage().response(r['path'],filename=r['filename'])
 
 
 def create_backup(connection=None):
     s=service()
-    def capture(c):
-        backfill_registry(c)
-        tables={}
-        for name in TABLES:tables[name]=[list(r) for r in c.execute(f'SELECT * FROM {name}')]
-        return tables
+    def capture(repo):
+        backfill_registry(repo)
+        return {name:[[key,body if name in ('mappings','rules') else json.dumps(body,ensure_ascii=False)] for key,body in repo.items(name)] for name in TABLES}
     if connection is None:
-        with s.db() as c:
-            c.execute('BEGIN');tables=capture(c)
+        with s.repository() as repo:tables=capture(repo)
     else:tables=capture(connection)
     assets={}
     for _,body in tables['batches']:
@@ -197,9 +191,8 @@ def create_backup(connection=None):
     with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:
         for name in assets:
             if not ASSET.fullmatch(name):raise HTTPException(400,'ชื่อไฟล์ในข้อมูลไม่ถูกต้อง')
-            path=s.storage().path(name)
-            if not path.is_file():raise HTTPException(409,'สำรองไม่ได้: ไม่พบไฟล์ '+name)
-            content=path.read_bytes();assets[name]=digest(content);z.writestr('files/'+name,content)
+            if not s.storage().exists(name):raise HTTPException(409,'สำรองไม่ได้: ไม่พบไฟล์ '+name)
+            content=s.storage().read(name);assets[name]=digest(content);z.writestr('files/'+name,content)
         manifest=dict(format='consignment-system-backup',version=2,created=now(),tables=tables,assets=assets)
         z.writestr('manifest.json',json.dumps(manifest,ensure_ascii=False))
     data=archive.getvalue()
@@ -272,19 +265,18 @@ def backup_summary(m):
 
 @router.get('/backups')
 def list_backups():
-    folder=service().DATA/'backups'
-    return [dict(name=p.name,bytes=p.stat().st_size) for p in sorted(folder.glob('*.zip'),reverse=True)] if folder.exists() else []
+    return [dict(name=Path(item['key']).name,bytes=item['bytes']) for item in reversed(service().storage().list('backups')) if item['key'].endswith('.zip')]
 
 @router.get('/backups/file/{name}')
 def backup_file(name:str):
     if not re.fullmatch(r'[0-9a-zT_-]+\.zip',name):raise HTTPException(400,'ชื่อสำรองไม่ถูกต้อง')
-    path=service().DATA/'backups'/name
-    if not path.is_file():raise HTTPException(404,'ไม่พบไฟล์สำรอง')
-    return FileResponse(path,filename=name)
+    key='backups/'+name
+    if not service().storage().exists(key):raise HTTPException(404,'ไม่พบไฟล์สำรอง')
+    return service().storage().response(key,filename=name)
 
 @router.post('/backups')
 def backup():
-    data,m=create_backup();folder=service().DATA/'backups';folder.mkdir(exist_ok=True)
+    data,m=create_backup()
     name='manual-'+uuid.uuid4().hex+'.zip';service().storage().write('backups/'+name, data)
     return dict(name=name,summary=backup_summary(m))
 
@@ -302,12 +294,11 @@ def restore(file:UploadFile,archive_hash:str=Form(...),confirm:bool=Form(False))
     if digest(data)!=archive_hash:raise HTTPException(409,'ไฟล์เปลี่ยนจากที่ตรวจตัวอย่าง กรุณาตรวจใหม่')
     try:m,contents=checked_backup(data)
     except Exception as ex:raise HTTPException(400,'ไฟล์สำรองไม่ถูกต้อง: '+str(ex)[:500])
-    s=service();folder=s.DATA/'backups';folder.mkdir(exist_ok=True);written=[]
+    s=service();written=[]
     safety='before-restore-'+uuid.uuid4().hex+'.zip'
     try:
-        with s.db() as c:
-            c.execute('BEGIN IMMEDIATE')
-            current,_=create_backup(c);s.storage().write('backups/'+safety, current)
+        with s.repository() as repo:
+            current,_=create_backup(repo);s.storage().write('backups/'+safety, current)
             # New names avoid replacing any current file before the database commits.
             rename = {}
             for _, body in m['tables']['batches']:
@@ -317,7 +308,7 @@ def restore(file:UploadFile,archive_hash:str=Form(...),confirm:bool=Form(False))
             for _, body in m['tables']['export_history']:
                 rename[json.loads(body)['path']] = 'exports/'+uuid.uuid4().hex+'.xlsx'
             for name,content in contents.items():
-                key=rename[name];written.append(s.storage().path(key));s.storage().write(key,content)
+                key=rename[name];written.append(key);s.storage().write(key,content)
             for table in TABLES:
                 records=deepcopy(m['tables'][table])
                 if table in ('batches','export_history'):
@@ -327,9 +318,9 @@ def restore(file:UploadFile,archive_hash:str=Form(...),confirm:bool=Form(False))
                             for f in obj['files']:f['path']=rename[f['path']]
                         else:obj['path']=rename[obj['path']]
                         record[1]=json.dumps(obj,ensure_ascii=False)
-                c.execute(f'DELETE FROM {table}')
-                c.executemany(f'INSERT INTO {table} VALUES (?,?)',records)
+                repo.clear(table)
+                for key,body in records:repo.put(table,key,body if table in ('mappings','rules') else json.loads(body))
     except Exception:
-        for path in written:path.unlink(missing_ok=True)
+        for key in written:s.delete_asset(key)
         raise
     return dict(restored=backup_summary(m),safety_backup=safety)

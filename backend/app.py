@@ -12,21 +12,25 @@ from pydantic import BaseModel, Field
 from backend.core import parse, validate, export_xlsx, dec, fmt, money, percent, discount_text, reverse_discount, export_discount, export_net, code, review_and_merge, below_cost_snapshot
 import openpyxl
 
-from backend.config import APP_VERSION, ROOT, DATA, DB, TEMPLATE, SAMPLES
+from backend.config import APP_VERSION, ROOT, DATA, DB, TEMPLATE, SAMPLES, STATE_DRIVER, STORAGE_DRIVER
 from backend.storage import LocalFileStore, ASSET, LEGACY_ASSET
+from backend.repository import SqliteRepository, json_repository, CURRENT, JsonTransaction, WriteConflict, StateTooLarge
 from contextlib import asynccontextmanager
 
 SOURCES = SAMPLES
 
 
 def storage():
+    if STORAGE_DRIVER == "vercel_blob":
+        from backend.blob_storage import BlobFileStore
+        return BlobFileStore()
     return LocalFileStore(DATA)
 
 
 @asynccontextmanager
 async def lifespan(app):
     storage().prepare()
-    with db():
+    with repository():
         pass
     retry_cleanup()
     yield
@@ -53,26 +57,39 @@ def db():
         c.close()
 
 
+@contextmanager
+def repository():
+    if STATE_DRIVER == 'json':
+        with json_repository(storage()) as repo: yield repo
+    else:
+        with db() as connection: yield SqliteRepository(connection)
+
+
+def delete_asset(key):
+    active = CURRENT.get()
+    if active is not None: active.deletes.add(key)
+    else: storage().delete(key)
+
+
 def load(batch_id):
-    with db() as c:
-        r=c.execute('SELECT body FROM batches WHERE id=?',(batch_id,)).fetchone()
-    if not r: raise HTTPException(404,'ไม่พบชุดข้อมูล')
-    return json.loads(r[0])
+    with repository() as repo: batch = repo.get('batches', batch_id)
+    if batch is None: raise HTTPException(404,'ไม่พบชุดข้อมูล')
+    return batch
 
 
 def save(b):
-    with db() as c:
-        c.execute('INSERT OR REPLACE INTO batches VALUES (?,?)',(b['id'],json.dumps(b,ensure_ascii=False)))
+    with repository() as repo:
+        repo.put('batches', b['id'], b)
         for f in b['files']:
-            if f.get('history_cleared'):continue
+            if f.get('history_cleared'): continue
             record=dict(id=f['id'],hash=f['hash'],name=f['name'],batch_id=b['id'],period=b['period'],at=f.get('imported_at',b['created']),duplicate_override=f.get('duplicate_override',False),error=f.get('error'))
-            c.execute('INSERT OR IGNORE INTO import_registry VALUES (?,?)',(f['id'],json.dumps(record,ensure_ascii=False)))
+            repo.put('import_registry', f['id'], record, ignore=True)
 
 
 def mapped(b,extra_maps=None):
-    with db() as c:
-        maps=dict(c.execute('SELECT key,sku FROM mappings'))
-        rules=dict(c.execute('SELECT customer,discount FROM rules'))
+    with repository() as repo:
+        maps=dict(repo.items('mappings'))
+        rules=dict(repo.items('rules'))
     if extra_maps:maps.update(extra_maps)
     for r in b['rows']:
         if not r['sku'] or r.get('sku_origin')=='ใช้รหัสอ้างอิงสินค้าต้นทาง · แก้ไขได้':
@@ -147,7 +164,6 @@ def add_file(b,content,name,profile=None,allow_duplicate=False,check_history=Fal
     if prior and not allow_duplicate:raise HTTPException(409,'ไฟล์นี้เคยนำเข้าแล้วในชุดอื่น กรุณาตรวจประวัติและยืนยันนำเข้าซ้ำ')
     file_id=uuid.uuid4().hex
     key=f"imports/{b['id']}/{file_id}{Path(name).suffix.lower()}"
-    path=storage().path(key)
     info=dict(id=file_id,name=name,hash=digest,path=key,rows=0,kind='',error=None,imported_at=datetime.now(timezone.utc).isoformat(),duplicate_override=bool(prior),profile_snapshot=profile)
     # Validate before saving untrusted archives; never extract ZIP entries.
     if len(content)>25*1024*1024: raise HTTPException(413,'ไฟล์ต้องไม่เกิน 25 MB')
@@ -166,7 +182,8 @@ def add_file(b,content,name,profile=None,allow_duplicate=False,check_history=Fal
             if not name.lower().endswith('.xlsx'):raise ValueError('รูปแบบที่ตั้งค่าใช้กับ Excel เท่านั้น')
             from backend.import_profiles import parse_profile
             rows,kind=parse_profile(content,name,profile['config'],sheets=sheets)
-        else:rows,kind=parse(path,name,sheets=sheets)
+        else:
+            with storage().materialize(key) as path: rows,kind=parse(path,name,sheets=sheets)
         if name.lower().endswith('.xlsx'):
             from backend.import_profiles import inspect_sheet_choices
             info['sheet_review']=inspect_sheet_choices(content,profile['config'] if profile else None)
@@ -189,29 +206,26 @@ class NewBatch(BaseModel):
 
 
 @app.get('/api/health')
-def health(): return {'ok':True,'version':APP_VERSION,'name':'ConsignmentSystem'}
+def health(): return {'ok':True,'version':APP_VERSION,'name':'ConsignmentSystem','state_driver':STATE_DRIVER,'storage_driver':STORAGE_DRIVER}
 
 @app.get('/api/batches')
 def batches():
-    with db() as c: rows=c.execute('SELECT body FROM batches ORDER BY rowid DESC LIMIT 20').fetchall()
-    return [dict(id=b['id'],created=b['created'],period=b['period'],rows=len(b['rows'])) for b in (json.loads(r[0]) for r in rows)]
+    with repository() as repo: rows = repo.items('batches', reverse=True)[:20]
+    return [dict(id=b['id'],created=b['created'],period=b['period'],rows=len(b['rows'])) for _, b in rows]
+
 
 def retry_cleanup():
-    with db() as c:
-        pending = c.execute('SELECT path FROM file_cleanup').fetchall()
+    with repository() as repo: pending = repo.items('file_cleanup')
     removed = 0
-    for (key,) in pending:
-        try:
-            storage().delete(key)
+    for key, _ in pending:
+        try: delete_asset(key)
         except (OSError, ValueError) as ex:
-            with db() as c:
-                c.execute('UPDATE file_cleanup SET last_error=? WHERE path=?', (str(ex)[:300], key))
+            with repository() as repo: repo.put('file_cleanup', key, str(ex)[:300])
         else:
-            with db() as c:
-                c.execute('DELETE FROM file_cleanup WHERE path=?', (key,))
-            removed += 1
-    with db() as c:
-        remaining = c.execute('SELECT COUNT(*) FROM file_cleanup').fetchone()[0]
+            if CURRENT.get() is None:
+                with repository() as repo: repo.delete('file_cleanup', key)
+                removed += 1
+    with repository() as repo: remaining = len(repo.items('file_cleanup'))
     return dict(removed=removed, remaining=remaining)
 
 
@@ -223,22 +237,24 @@ def cleanup_files():
 @app.delete('/api/batches')
 def clear_batches():
     # Commit logical deletion before touching file bytes. Cleanup is idempotent.
-    with db() as c:
+    with repository() as repo:
         from backend.operations import backfill_registry
-        backfill_registry(c)
-        bodies = c.execute('SELECT body FROM batches').fetchall()
-        keep = {json.loads(row[0])['path'] for row in c.execute('SELECT body FROM export_history')}
-        targets = {f['path'] for (body,) in bodies for f in json.loads(body)['files']}
-        targets.update(str(p.relative_to(DATA)) for p in (DATA/'imports').rglob('*') if p.is_file())
-        targets.update(p.name for p in DATA.glob('*') if p.is_file() and LEGACY_ASSET.fullmatch(p.name))
+        backfill_registry(repo)
+        bodies = repo.items('batches')
+        keep = {row['path'] for _, row in repo.items('export_history')}
+        targets = {f['path'] for _, body in bodies for f in body['files']}
+        # JSON requests only delete referenced assets: sweeping unreferenced files
+        # could remove a concurrent request's not-yet-committed upload.
+        if STATE_DRIVER == 'sqlite':
+            targets.update(item['key'] for item in storage().list('imports'))
+            targets.update(item['key'] for item in storage().list() if LEGACY_ASSET.fullmatch(item['key']))
         targets = {key for key in targets if key not in keep and ASSET.fullmatch(key)}
-        c.executemany('INSERT OR IGNORE INTO file_cleanup(path) VALUES (?)', [(key,) for key in targets])
-        for key, body in c.execute('SELECT id,body FROM import_registry').fetchall():
-            entry = json.loads(body)
+        for key in targets: repo.put('file_cleanup', key, None, ignore=True)
+        for key, entry in repo.items('import_registry'):
             entry['source_available'] = False
             entry.setdefault('source_deleted_at', datetime.now(timezone.utc).isoformat())
-            c.execute('UPDATE import_registry SET body=? WHERE id=?', (json.dumps(entry, ensure_ascii=False), key))
-        c.execute('DELETE FROM batches')
+            repo.put('import_registry', key, entry)
+        repo.clear('batches')
     cleanup = retry_cleanup()
     return {'deleted_batches': len(bodies), 'cleanup_pending': cleanup['remaining']}
 
@@ -277,9 +293,9 @@ def upload(batch_id:str,files:list[UploadFile],profile_id:str=Form(''),allow_dup
             add_file(b,f.file.read(25*1024*1024+1),f.filename or 'unknown',profile,allow_duplicate,True,sheets=selections.get(str(index)))
         save(mapped(b))
     except Exception:
-        with db() as c:
-            c.executemany('INSERT OR IGNORE INTO file_cleanup(path) VALUES (?)',
-                          [(f['path'],) for f in b['files'] if f['id'] not in previous])
+        with repository() as repo:
+            for f in b['files']:
+                if f['id'] not in previous: repo.put('file_cleanup', f['path'], None, ignore=True)
         retry_cleanup()
         raise
     return summary(b)
@@ -426,10 +442,10 @@ def edit(batch_id:str,row_id:str,payload:Edit):
     if payload.remember and r['sku'] and not any('SKU' in e for e in r['errors']):
         key='barcode:'+r['barcode'] if r['barcode'] else ('partner:'+r['customer']+':'+r['partner'] if r['partner'] else None)
         if key:
-            with db() as c:
-                old=c.execute('SELECT sku FROM mappings WHERE key=?',(key,)).fetchone()
-                if old and old[0]!=r['sku']: raise HTTPException(409,'รหัสนี้มี Mapping อื่นแล้ว ใช้การแก้เฉพาะแถวหรือตรวจตารางอ้างอิง')
-                c.execute('INSERT OR REPLACE INTO mappings VALUES (?,?)',(key,r['sku']))
+            with repository() as repo:
+                old=repo.get('mappings',key)
+                if old and old!=r['sku']: raise HTTPException(409,'รหัสนี้มี Mapping อื่นแล้ว ใช้การแก้เฉพาะแถวหรือตรวจตารางอ้างอิง')
+                repo.put('mappings',key,r['sku'])
     save(mapped(b));return r
 
 class Rule(BaseModel):
@@ -448,7 +464,7 @@ def rule(batch_id:str,payload:Rule):
             r['discount_origin']='ผู้ใช้กำหนดแทนค่าเริ่มต้น'
             count+=1
     if payload.remember:
-        with db() as c:c.execute('INSERT OR REPLACE INTO rules VALUES (?,?)',(payload.customer,discount))
+        with repository() as repo: repo.put('rules',payload.customer,discount)
     save(b);return {'updated':count}
 
 @app.post('/api/batches/{batch_id}/master')
@@ -481,11 +497,12 @@ def master(batch_id:str,file:UploadFile,preview:bool=Form(False)):
                 if key in entries and entries[key]!=sku:raise ValueError(f'รหัสซ้ำจับคู่หลาย SKU ในแถว {i}')
                 entries[key]=sku
         if not entries:raise ValueError('ไม่พบรายการ Mapping')
-        with db() as c:
+        with repository() as repo:
             for key,sku in entries.items():
-                old=c.execute('SELECT sku FROM mappings WHERE key=?',(key,)).fetchone()
-                if old and old[0]!=sku:raise ValueError('Mapping ขัดแย้งกับข้อมูลที่บันทึกไว้: '+key)
-            if not preview:c.executemany('INSERT OR REPLACE INTO mappings VALUES (?,?)',entries.items())
+                old=repo.get('mappings',key)
+                if old and old!=sku:raise ValueError('Mapping ขัดแย้งกับข้อมูลที่บันทึกไว้: '+key)
+            if not preview:
+                for key,sku in entries.items(): repo.put('mappings',key,sku)
     except Exception as ex:raise HTTPException(400,str(ex)[:300])
     before=[r['sku'] for r in b['rows']];mapped(b,entries)
     changes=[dict(id=r['id'],before=old,after=r['sku']) for old,r in zip(before,b['rows']) if old!=r['sku']]
@@ -497,7 +514,7 @@ def source_file(batch_id:str,file_id:str):
     b=load(batch_id);f=next((f for f in b['files'] if f['id']==file_id),None)
     if not f:raise HTTPException(404,'ไม่พบไฟล์')
     if not storage().exists(f['path']):raise HTTPException(404,'ไฟล์ต้นฉบับถูกล้างหรือไม่พบไฟล์')
-    return FileResponse(storage().path(f['path']),filename=f['name'])
+    return storage().response(f['path'],filename=f['name'])
 
 @app.delete('/api/batches/{batch_id}/files/{file_id}')
 def remove_file(batch_id:str,file_id:str):
@@ -517,7 +534,6 @@ def export(batch_id:str,scope:Literal['all','ready']='all'):
     if not rows:
         raise HTTPException(409,'ยังไม่มีรายการที่พร้อมส่งออก')
     key='exports/'+uuid.uuid4().hex+'.xlsx'
-    path=storage().path(key)
     try:storage().write_from(key, lambda temp: export_xlsx(rows,TEMPLATE,temp))
     except ValueError as ex:raise HTTPException(409,str(ex))
     suffix='_ready' if scope=='ready' else ''
@@ -526,9 +542,9 @@ def export(batch_id:str,scope:Literal['all','ready']='all'):
     snapshot=dict(period=b['period'],template_hash=hashlib.sha256(TEMPLATE.read_bytes()).hexdigest(),rows=[dict(sku=r['sku'],price=str(float(dec(r['price']))),qty=str(float(dec(r['qty']))),discount=export_discount(r['discount'])) for r in sorted(rows,key=lambda r:r['sku'])])
     snapshot_hash=hashlib.sha256(json.dumps(snapshot,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
     previous=sum(e['snapshot_hash']==snapshot_hash for e in json_rows('export_history'))
-    record=dict(id=uuid.uuid4().hex,batch_id=batch_id,at=datetime.now(timezone.utc).isoformat(),scope=scope,rows=len(rows),source_rows=included,skipped_rows=state['blocked'],skipped_files=state['file_errors'],filename=f'Consign_{b["period"]}{suffix}.xlsx',path=key,hash=hashlib.sha256(path.read_bytes()).hexdigest(),snapshot_hash=snapshot_hash,snapshot=snapshot,rounding_delta=rounding_delta,source_files=[{k:f[k] for k in ('id','name','hash')} for f in b['files']],previous_identical_exports=previous)
+    record=dict(id=uuid.uuid4().hex,batch_id=batch_id,at=datetime.now(timezone.utc).isoformat(),scope=scope,rows=len(rows),source_rows=included,skipped_rows=state['blocked'],skipped_files=state['file_errors'],filename=f'Consign_{b["period"]}{suffix}.xlsx',path=key,hash=hashlib.sha256(storage().read(key)).hexdigest(),snapshot_hash=snapshot_hash,snapshot=snapshot,rounding_delta=rounding_delta,source_files=[{k:f[k] for k in ('id','name','hash')} for f in b['files']],previous_identical_exports=previous)
     put('export_history',record['id'],record)
-    return FileResponse(path,filename=f'Consign_{b["period"]}{suffix}.xlsx',
+    return storage().response(key,filename=f'Consign_{b["period"]}{suffix}.xlsx',
         headers={'X-Export-Rounding-Delta':rounding_delta,'X-Export-ID':record['id'],'X-Previous-Identical-Exports':str(previous),'X-Exported-Rows':str(len(rows)),
                  'X-Exported-Source-Rows':str(included),
                  'X-Skipped-Rows':str(len(b['rows'])-included),
@@ -546,3 +562,31 @@ async def operation_lock(request,call_next):
 
 from backend.operations import router as operations_router
 app.include_router(operations_router)
+
+@app.middleware('http')
+async def json_unit_of_work(request, call_next):
+    if STATE_DRIVER != 'json': return await call_next(request)
+    from starlette.concurrency import run_in_threadpool
+    from starlette.responses import JSONResponse
+    try: transaction = await run_in_threadpool(JsonTransaction, storage())
+    except (OSError, ValueError):
+        return JSONResponse({'detail':'อ่านข้อมูลจัดเก็บไม่สำเร็จ กรุณาตรวจการตั้งค่า Storage'},status_code=503)
+    token = CURRENT.set(transaction)
+    try:
+        response = await call_next(request)
+        if response.status_code < 400:
+            await run_in_threadpool(transaction.commit)
+        return response
+    except WriteConflict:
+        return JSONResponse({'detail':'ข้อมูลถูกแก้ไขโดยคำขออื่น กรุณาโหลดใหม่ก่อนบันทึก'}, status_code=409)
+    except StateTooLarge:
+        return JSONResponse({'detail':'ข้อมูล JSON เกินขนาด Beta 64 MiB กรุณาสำรองและลดข้อมูล'}, status_code=413)
+    except OSError:
+        return JSONResponse({'detail':'บันทึกหรืออ่านไฟล์ไม่สำเร็จ กรุณาลองใหม่'},status_code=503)
+    finally:
+        CURRENT.reset(token)
+
+from backend.beta_auth import install_beta_auth
+from backend.cloud_transport import CloudTransportMiddleware
+app.add_middleware(CloudTransportMiddleware)
+install_beta_auth(app)

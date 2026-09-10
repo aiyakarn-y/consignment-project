@@ -1,4 +1,5 @@
 'use client';
+import { apiFetch } from '../lib/api-fetch';
 
 import {useEffect,useRef,useState} from 'react';
 import {LoaderCircle,Download,Save,Upload} from 'lucide-react';
@@ -19,7 +20,7 @@ type BackupSummary={created:string;batches:number;rows:number;profiles:number;va
 const defaultValuation:Valuation={sale_basis:'unknown',cost_basis:'unknown',settlement_basis:'unknown',vat_rate:'7',note:''};
 const defaultConfig:ProfileConfig={expected_headers:{},net_source:'mapped',name:'',sheet:'',header_row:1,end_row:null,columns:{},customer:'',branch:'',discount_mode:'auto',valuation:defaultValuation};
 const fields:[string,string][]=[['sku','SKU / รหัสสินค้า'],['partner','รหัสสินค้าอ้างอิง'],['barcode','Barcode (อ้างอิงเท่านั้น)'],['qty','จำนวน'],['price','ราคาขายต่อหน่วย'],['gross','ยอดขายรวม'],['cost_price','ต้นทุนต่อหน่วย'],['cost_total','ต้นทุนรวม'],['net','ยอดหลังหัก / ส่งคืนรวม'],['discount','ส่วนลด / GP'],['mg','MG (ข้อมูลประกอบ)'],['customer','ลูกค้า / Shop'],['branch','ชื่อสาขา'],['branch_code','รหัสสาขา'],['date','วันที่ขาย']];
-async function api<T>(url:string,options?:RequestInit):Promise<T>{const r=await fetch('/api'+url,options);if(!r.ok){const e=await r.json().catch(()=>({detail:'ติดต่อระบบไม่ได้'}));throw new Error(typeof e.detail==='string'?e.detail:JSON.stringify(e.detail));}return r.json();}
+async function api<T>(url:string,options?:RequestInit):Promise<T>{const r=await apiFetch('/api'+url,options);if(!r.ok){const e=await r.json().catch(()=>({detail:'ติดต่อระบบไม่ได้'}));throw new Error(typeof e.detail==='string'?e.detail:JSON.stringify(e.detail));}return r.json();}
 const post=(body:unknown):RequestInit=>({method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 const num=(n:string|number|null|undefined)=>n==null?'ไม่ระบุ':Number(n).toLocaleString('th-TH',{maximumFractionDigits:2});
 const date=(v:string)=>new Date(v).toLocaleString('th-TH');

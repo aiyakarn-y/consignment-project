@@ -1,5 +1,6 @@
 """Run both services locally and stop only the supervisor owned by this workspace."""
 import argparse
+import base64
 import errno
 import json
 import os
@@ -18,6 +19,13 @@ from backend.config import DATA
 
 RUNTIME = DATA / 'logs' / 'local-runtime.json'
 CHILDREN = []
+
+
+def mode_command(action):
+    if os.environ.get('CONSIGN_BETA_MODE') != '1':
+        return 'npm start' if action == 'start' else 'npm run '+action
+    prefix = 'blob' if os.environ.get('CONSIGN_STORAGE_DRIVER') == 'vercel_blob' else ('json' if os.environ.get('CONSIGN_STATE_DRIVER') == 'json' else 'beta')
+    return f'npm run {prefix}:{action}'
 
 
 def running_process(pid):
@@ -52,8 +60,9 @@ def start():
             existing_host = record.get('host', '127.0.0.1')
             if existing_host == '0.0.0.0':
                 existing_host = '127.0.0.1'
+            restart = mode_command('stop')+' ก่อน แล้วจึงรัน '+mode_command('start')
             print(f"ConsignmentSystem ทำงานอยู่แล้ว: http://{existing_host}:{record['frontend_port']}\n"
-                  'หากต้องการเริ่มใหม่ ให้รัน npm run stop ก่อน แล้วจึงรัน npm start')
+                  f'หากต้องการเริ่มใหม่ ให้รัน {restart}')
             return
     host = os.environ.get('CONSIGN_HOST', '127.0.0.1')
     backend = int(os.environ.get('CONSIGN_BACKEND_PORT', '8100'))
@@ -90,13 +99,18 @@ def start():
         signal.signal(signal.SIGINT, handle_signal)
         signal.signal(signal.SIGTERM, handle_signal)
         for _ in range(100):
-            if any(child.poll() is not None for child in CHILDREN):raise RuntimeError('Service exited; inspect data/local/logs')
+            if any(child.poll() is not None for child in CHILDREN):raise RuntimeError(f'Service exited; inspect {RUNTIME.parent}')
             try:
-                with urllib.request.urlopen(f'http://127.0.0.1:{frontend}/api/health', timeout=1) as r:
+                request = urllib.request.Request(f'http://127.0.0.1:{frontend}/api/health')
+                if env.get('CONSIGN_BETA_MODE') == '1':
+                    credentials = f"{env.get('CONSIGN_BETA_USER', 'beta')}:{env['CONSIGN_BETA_PASSWORD']}"
+                    request.add_header('Authorization', 'Basic '+base64.b64encode(credentials.encode()).decode())
+                with urllib.request.urlopen(request, timeout=1) as r:
                     if r.status == 200:break
             except Exception:time.sleep(.2)
         else:raise RuntimeError('Startup health check timed out')
-        print(f'ConsignmentSystem: http://127.0.0.1:{frontend}\nData: {DATA}\nStop: Ctrl+C or npm run stop', flush=True)
+        stop_command = mode_command('stop')
+        print(f'ConsignmentSystem: http://127.0.0.1:{frontend}\nData: {DATA}\nStop: Ctrl+C or {stop_command}', flush=True)
         while all(child.poll() is None for child in CHILDREN):time.sleep(.5)
         raise RuntimeError('A service stopped unexpectedly; inspect logs')
     finally:

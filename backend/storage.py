@@ -3,6 +3,9 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import tempfile
+import hashlib
+import fcntl
+from contextlib import contextmanager
 from typing import Protocol
 
 LEGACY_ASSET = re.compile(r'[0-9a-f]{32}\.(?:xlsx|pdf)')
@@ -66,3 +69,38 @@ class LocalFileStore:
         fd, probe = tempfile.mkstemp(prefix='startup-', dir=self.root / 'temp')
         os.close(fd)
         Path(probe).unlink()
+
+    def list(self, prefix=''):
+        folder = self.path(prefix) if prefix else self.root
+        return [dict(key=str(p.relative_to(self.root)), bytes=p.stat().st_size)
+                for p in sorted(folder.rglob('*')) if p.is_file()] if folder.exists() else []
+
+    def read_version(self, key):
+        path = self.path(key)
+        if not path.exists(): return None, None
+        content = path.read_bytes()
+        return content, hashlib.sha256(content).hexdigest()
+
+    def compare_and_swap(self, key, content, expected):
+        from backend.repository import WriteConflict
+        destination = self.path(key)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.with_suffix('.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            _, actual = self.read_version(key)
+            if actual != expected: raise WriteConflict('Data changed; reload and retry')
+            fd, temp = tempfile.mkstemp(dir=destination.parent)
+            try:
+                with os.fdopen(fd, 'wb') as handle:
+                    handle.write(content); handle.flush(); os.fsync(handle.fileno())
+                os.replace(temp, destination)
+            finally:
+                Path(temp).unlink(missing_ok=True)
+
+    @contextmanager
+    def materialize(self, key):
+        yield self.path(key)
+
+    def response(self, key, filename, **kwargs):
+        from fastapi.responses import FileResponse
+        return FileResponse(self.path(key), filename=filename, **kwargs)

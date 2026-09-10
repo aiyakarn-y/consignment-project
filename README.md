@@ -2,6 +2,11 @@
 
 รุ่นทดสอบ **v0.3.0-beta.1 (Beta 1)** · สภาพแวดล้อม Local
 
+เลือกโหมดข้อมูลได้แล้ว: `npm run beta:start` (SQLite), `npm run json:start`
+(JSON บนเครื่อง), หรือ `npm run blob:start` (JSON บน Private Blob หลังตั้งค่า).
+แต่ละโหมดแยกข้อมูลและพอร์ต ดู [วิธีสลับโหมดและเตรียม Cloud](docs/storage-modes.md).
+เมื่อพร้อม ให้ทำตาม [คู่มือ Deploy Vercel ด้วยตนเอง](docs/vercel-deploy.md).
+
 เว็บภาษาไทยสำหรับนำเข้ารายงานขายฝากขาย ตรวจ/แก้ข้อมูล รวมตาม SKU และส่งออกตามแม่แบบ `Consign_sample.xlsx` โค้ด Frontend/Backend และข้อมูล Local อยู่ใต้ Workspace เดียวกัน โดย `data/` ไม่เข้า Git หรือ Docker image
 
 ## ใช้งานบนเครื่อง
@@ -105,3 +110,11 @@ Git เป็น repository บนเครื่อง ยังไม่มี
 - แหล่งยอดสุทธิมี 3 แบบ: ใช้คอลัมน์ที่ Mapping (ค่าเริ่มต้น), ยืนยันว่าต้นทุนเป็นยอดส่งคืน, หรือไม่มีฐานสุทธิ หากไม่มีส่วนลดและฐานสุทธิจะเริ่ม 0% ซึ่งแก้ภายหลังได้
 - ไฟล์หลายชีตมีหน้าต่างเลือกชีต ต้องเลือกเฉพาะรายละเอียดขายและข้ามชีตสรุปที่ซ้ำกัน ดูจำนวนรายการ/ยอดก่อนหักแยกชีตหลัง Import ได้ Profile เดียวใช้ข้ามชีตได้เมื่อหัวคอลัมน์ตรงกัน ส่วนชีตที่ไม่ตรงต้องตั้งรูปแบบที่เหมาะสมก่อน
 - Master Mapping มี Preview จำนวน/ตัวอย่างรายการก่อนยืนยัน แทนได้เฉพาะ SKU ว่างหรือรหัสอ้างอิงชั่วคราว และเก็บประวัติการเปลี่ยน ไม่ทับ SKU จริงหรือค่าที่ผู้ใช้แก้เอง
+# Password-protected local Beta
+
+Prepare once: `npm run beta:setup` (hidden password prompt, at least 12 ASCII characters without spaces), then `npm run build`.
+Run `npm run beta:start`; open http://127.0.0.1:3119 and sign in as `beta` with your chosen password.
+Credentials stay in ignored `.env.beta`. Beta uses `data/beta-test/` and backend port 8102; regular Local remains on 3117/8100 with its existing data.
+Use `npm run beta:status` and `npm run beta:stop` (or Ctrl+C in its terminal). Stop Beta before changing `.env.beta`, then restart.
+
+To share after checking the password prompt locally, run `cloudflared tunnel --url http://localhost:3119` in another terminal. This is a public HTTPS tunnel; keep the password private, use test data, and keep the Mac awake. Stop the tunnel with Ctrl+C first when finished. All testers share one dataset; coordinate edits. Closing a browser/private session clears its cached Basic login; there is no in-app logout or individual user account yet. No tunnel starts automatically.

@@ -1,6 +1,8 @@
 'use client';
+import { apiFetch } from '../lib/api-fetch';
 
-import {version as appVersion} from '../package.json';
+import appPackage from '../package.json';
+const appVersion = appPackage.version;
 import SheetPicker,{type ImportCheck,type SheetRequest,type SheetSelection,type SheetChoice} from './sheet-picker';
 import OperationsPanel,{type Profile} from './operations-panel';
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
@@ -22,13 +24,15 @@ const displayDiscount = (value:string) => value.split('+').map(part=>{
   return Number(text).toLocaleString('en-US',{useGrouping:false,minimumFractionDigits:2,maximumFractionDigits:2})+'%';
 }).join('+');
 async function api<T>(url:string, init?:RequestInit):Promise<T> {
-  const response=await fetch('/api'+url,init);
+  const response=await apiFetch('/api'+url,init);
   if(!response.ok){const body=await response.json().catch(()=>({detail:'ติดต่อระบบประมวลผลไม่ได้'}));throw new Error(typeof body.detail==='string'?body.detail:JSON.stringify(body.detail));}
   return response.json();
 }
 const json = (method:string,body:unknown):RequestInit => ({method,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 
 export default function Home(){
+  const [storageMode,setStorageMode]=useState('Local');
+  useEffect(()=>{api<{state_driver:string;storage_driver:string}>('/health').then(h=>setStorageMode(h.storage_driver==='vercel_blob'?'Cloud JSON':h.state_driver==='json'?'Local JSON':'Local SQLite')).catch(()=>{});},[]);
   const [checkedIds,setCheckedIds]=useState<string[]>([]);const [bulkOpen,setBulkOpen]=useState(false);const [bulkField,setBulkField]=useState('discount');const [bulkValue,setBulkValue]=useState('');
   const [sheetRequest,setSheetRequest]=useState<SheetRequest|null>(null);
   const sheetResolver=useRef<((selection:SheetSelection|null)=>void)|null>(null);
@@ -83,7 +87,7 @@ export default function Home(){
   const uploadMaster=(file:File)=>run(async()=>{if(!batch)throw new Error('นำเข้ารายงานก่อนเพิ่มตารางอ้างอิง');const data=new FormData();data.append('file',file);data.append('preview','true');const preview=await api<{mappings:number;resolved:number;changes:{before:string;after:string}[]}>(`/batches/${batch.id}/master`,{method:'POST',body:data});if(!window.confirm(`Master Mapping ${preview.mappings} คู่ จะเปลี่ยนรหัสว่าง/ชั่วคราว ${preview.resolved} รายการ\n${preview.changes.slice(0,10).map(c=>`${c.before||'(ว่าง)'} → ${c.after}`).join('\n')}\nยืนยันบันทึกหรือไม่? SKU จริงและค่าที่แก้เองจะคงเดิม`)){setNotice({text:'ยกเลิก Mapping แล้ว',error:false});return;}data.set('preview','false');const r=await api<{mappings:number;resolved:number}>(`/batches/${batch.id}/master`,{method:'POST',body:data});await refresh(batch.id);setNotice({text:`บันทึก ${r.mappings} mapping · จับคู่เพิ่ม ${r.resolved} รายการ`,error:false});},'กำลังจับคู่ SKU…');
   const exportFile=(scope:'all'|'ready')=>run(async()=>{
     if(!batch)return;
-    const res=await fetch(`/api/batches/${batch.id}/export?scope=${scope}`);
+    const res=await apiFetch(`/api/batches/${batch.id}/export?scope=${scope}`);
     if(!res.ok){const e=await res.json();throw new Error(e.detail);}
     const exported=Number(res.headers.get('X-Exported-Rows'));
     const included=Number(res.headers.get('X-Exported-Source-Rows'));
@@ -113,7 +117,7 @@ export default function Home(){
       </nav>
       <div className="history-title"><History size={14}/> ชุดข้อมูลล่าสุด</div>
       <div className="history-list">{history.slice(0,6).map(h=><button key={h.id} disabled={!!busy} className={batch?.id===h.id?'current':''} onClick={()=>run(async()=>{await refresh(h.id);resetFilters();},'กำลังเปิดชุดข้อมูล…')}><span className="history-dot"/><span>{h.period}<small>{h.rows.toLocaleString()} รายการ · {new Date(h.created).toLocaleDateString('th-TH',{day:'numeric',month:'short'})}</small></span></button>)}{!history.length&&<p>ยังไม่มีประวัติการนำเข้า</p>}</div>
-      <div className="sidebar-foot"><div className="local-dot"/><span>Local · Beta 1<small>ข้อมูลจัดเก็บบนเครื่องนี้</small></span><span className="version">v{appVersion}</span></div>
+      <div className="sidebar-foot"><div className="local-dot"/><span>{storageMode} · Beta 1<small>{storageMode==='Cloud JSON'?'ข้อมูลทดสอบบน Cloud':'ข้อมูลจัดเก็บบนเครื่องเซิร์ฟเวอร์'}</small></span><span className="version">v{appVersion}</span></div>
     </aside>
     <main inert={!!busy} aria-busy={!!busy}>
       <header className="topbar"><div>Workspace <span>/</span> <strong>ยอดขายฝากขาย</strong></div><div className="top-right"><span className="demo-tag">BETA 1</span><span className="avatar">W</span></div></header>
@@ -155,7 +159,7 @@ export default function Home(){
           {tab==='totals'&&<div className="totals-content"><h3>ตรวจยอดตามลูกค้า / Shop → สาขา</h3><p>ยอดรวมทุกรายการที่นำเข้า รวมรายการรอแก้และรายการคืน · คลิก Shop เพื่อดูแต่ละสาขา</p><div className="table-scroll"><table><thead><tr><th>ลูกค้า / Shop · สาขา</th><th className="numeric">จำนวนสุทธิ</th><th className="numeric">ยอดขายรวมต้นทาง</th><th className="numeric">ราคาขาย × จำนวน</th><th className="numeric">ต้นทุนรวมต้นทาง</th><th className="numeric">ยอดหลัง GP / ส่งคืนต้นทาง</th><th className="numeric">ยอดหลังส่วนลดคำนวณ</th><th>สถานะรายการ</th><th/></tr></thead><tbody>{batch?.groups.map(g=><Fragment key={g.customer}><tr className="shop-total"><td><button className="shop-toggle" aria-expanded={expandedShops.includes(g.customer)} onClick={()=>setExpandedShops(v=>v.includes(g.customer)?v.filter(x=>x!==g.customer):[...v,g.customer])}><ChevronRight size={16}/><strong>{g.customer}</strong></button><small>{g.rows.toLocaleString()} รายการ · {g.branches} สาขา/กลุ่ม</small></td><TotalCells totals={g}/><td><button className="text-button" aria-label={`ดูรายการทั้งหมด ${g.customer}`} onClick={()=>showBranch(g.customer)}>ดูรายการ</button></td></tr>{expandedShops.includes(g.customer)&&g.branch_groups.map(b=><tr className="branch-total" key={b.key}><td><strong>{b.branch}</strong><small>{b.branch_code?`รหัส ${b.branch_code} · `:''}{b.rows.toLocaleString()} รายการ</small></td><TotalCells totals={b}/><td><button className="text-button" aria-label={`ดูรายการ ${g.customer} ${b.branch_code||b.branch}`} onClick={()=>showBranch(g.customer,b.key)}>ดูรายการ <ChevronRight size={14}/></button></td></tr>)}</Fragment>)}</tbody></table></div>{!batch?.rows&&<div className="empty"><h3>นำเข้ารายงานเพื่อดูยอด Shop และสาขา</h3></div>}<div className="logic-note"><ShieldCheck size={20}/><p>ต้นทุนกับยอดหลัง GP เป็นคนละข้อมูล: Big C ใช้ราคาทุน L × จำนวน K; Outlet ไม่ระบุต้นทุน จึงแสดง “ไม่ระบุ” แม้ตั้งส่วนลด 0% · ยอดแต่ละสาขารวมกลับเป็นยอดของ Shop เดียวกัน ใช้ฐานราคาตามไฟล์โดยไม่ปรับ VAT เพิ่ม · ยอดสุทธิคำนวณรวมส่วนลดค่าเริ่มต้น 0% ที่แก้ภายหลังได้ และแสดงจำนวนไว้ให้ตรวจสอบ · ยอดที่จะส่งออกเฉพาะรายการที่พร้อมดูได้ใน “รวมตาม SKU”</p></div></div>}
         </section>
         <section className="export-bar"><div className="export-description"><div className="excel-icon"><FileSpreadsheet size={24}/></div><div><strong>รวม SKU ซ้ำเป็นแถวเดียว พร้อมส่งออก</strong><p>Sample · Items / Price / Qty / Discount <span>· รวมทุกลูกค้าและสาขา</span></p></div></div><div className="export-action"><span className="export-counts">พร้อม {number(batch?.ready||0,0)} รายการ → {number(batch?.merged_rows||0,0)} SKU · ยังไม่ส่งออก {number(batch?.blocked||0,0)} รายการ{batch?.file_errors?` และ ${batch.file_errors} ไฟล์`:''}<small>ส่งออกรายการของชุดนี้ทั้งหมด ไม่จำกัดตามตัวกรองตาราง</small></span><div className="export-buttons"><button className="button secondary" disabled={!batch?.exportable||!!busy} onClick={()=>exportFile('all')}><ArrowDownToLine size={17}/> Export Excel</button><button className="button primary" disabled={!batch?.ready||!!busy} onClick={()=>exportFile('ready')}><ArrowDownToLine size={17}/> Export เฉพาะรายการที่พร้อม</button></div></div></section>
-        <footer className="footer"><span>ConsignmentSystem <span> / </span> LOCAL · BETA 1</span><span>ไฟล์ต้นฉบับคงเดิม · รวมตาม SKU ในไฟล์ส่งออก</span></footer>
+        <footer className="footer"><span>ConsignmentSystem <span> / </span> {storageMode} · BETA 1</span><span>ไฟล์ต้นฉบับคงเดิม · รวมตาม SKU ในไฟล์ส่งออก</span></footer>
       </div>
     </main>
     {busy&&!sheetRequest&&<LoadingOverlay message={busy}/>}
