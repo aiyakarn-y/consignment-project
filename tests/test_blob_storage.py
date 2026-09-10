@@ -151,10 +151,11 @@ def test_blob_errors_do_not_expose_token():
 
 
 @pytest.mark.parametrize('failure', ['before', 'after', 'after_read_failure', 'timeout', 'competing', 'persistent', 'forbidden'])
-def test_blob_put_recovers_temporary_failure_without_overwriting(monkeypatch, failure):
+@pytest.mark.parametrize('existing', [False, True])
+def test_blob_put_recovers_temporary_failure_without_overwriting(monkeypatch, failure, existing):
     monkeypatch.setattr('backend.blob_storage.time.sleep', lambda _: None)
     fake=FakeBlob(); base=fake.store()
-    base.write(STATE_KEY,b'old')
+    if existing:base.write(STATE_KEY,b'old')
     _,etag=base.read_version(STATE_KEY)
     attempts=[]
     read_failed=False
@@ -179,10 +180,42 @@ def test_blob_put_recovers_temporary_failure_without_overwriting(monkeypatch, fa
         assert base.read(STATE_KEY)==b'other writer'
     elif failure in ('persistent','forbidden'):
         with pytest.raises(OSError):store.compare_and_swap(STATE_KEY,b'new',etag)
-        assert base.read(STATE_KEY)==b'old'
+        assert base.read_version(STATE_KEY)[0]==(b'old' if existing else None)
         assert len(attempts)==(3 if failure=='persistent' else 1)
     else:
         store.compare_and_swap(STATE_KEY,b'new',etag)
         assert base.read(STATE_KEY)==b'new'
         assert len(attempts)==(1 if failure=='after' else 2)
     assert all(value==etag for value in attempts)
+
+
+@pytest.mark.parametrize('status', [429, 500, 502, 503, 504])
+@pytest.mark.parametrize('committed', [False, True])
+def test_export_recovers_blob_failure_once(monkeypatch, status, committed):
+    monkeypatch.setattr('backend.blob_storage.time.sleep', lambda _: None)
+    fake=FakeBlob(); fault={'enabled':False, 'count':0}
+    def handle(request):
+        if request.method=='PUT' and request.url.params.get('pathname','').endswith('/'+STATE_KEY) and fault['enabled']:
+            fault['enabled']=False;fault['count']+=1
+            if committed:fake.handle(request)
+            return httpx.Response(status)
+        return fake.handle(request)
+    store=BlobFileStore(token='vercel_blob_rw_TestStore_fixture',prefix='isolated-test',transport=httpx.MockTransport(handle))
+    monkeypatch.setattr(service,'STATE_DRIVER','json')
+    monkeypatch.setattr(service,'STORAGE_DRIVER','vercel_blob')
+    monkeypatch.setattr(service,'storage',lambda:store)
+    with TestClient(service.app) as client:
+        cfg=client.post('/api/profiles',json={'config':profile()}).json()
+        batch=client.post('/api/batches',json={}).json()
+        url='/api/batches/'+batch['id']
+        assert upload(client,url,profile_id=cfg['id']).status_code==200
+        fault['enabled']=True
+        result=client.get(url+'/export',headers={'X-Consign-Fetch':'1'})
+        assert result.status_code==200,result.text
+        assert fault['count']==1
+        history=client.get('/api/export-history').json()
+        assert len(history)==1
+        assert sum('/exports/' in key for key in fake.objects)==1
+        import io,openpyxl
+        workbook=openpyxl.load_workbook(io.BytesIO(store.read(history[0]['path'])))
+        assert workbook.active.cell(2,1).value=='NEW-SKU'
