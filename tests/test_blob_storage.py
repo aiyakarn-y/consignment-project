@@ -148,3 +148,41 @@ def test_blob_errors_do_not_expose_token():
     assert 'vercel_blob_rw' not in str(error.value)
     for key in ['../state','https://other/a','/root','a\\b']:
         with pytest.raises(ValueError):store.read(key)
+
+
+@pytest.mark.parametrize('failure', ['before', 'after', 'after_read_failure', 'timeout', 'competing', 'persistent', 'forbidden'])
+def test_blob_put_recovers_temporary_failure_without_overwriting(monkeypatch, failure):
+    monkeypatch.setattr('backend.blob_storage.time.sleep', lambda _: None)
+    fake=FakeBlob(); base=fake.store()
+    base.write(STATE_KEY,b'old')
+    _,etag=base.read_version(STATE_KEY)
+    attempts=[]
+    read_failed=False
+    def handle(request):
+        nonlocal read_failed
+        if failure=='after_read_failure' and request.method=='GET' and attempts and not read_failed:
+            read_failed=True
+            return httpx.Response(503)
+        if request.method=='PUT':
+            attempts.append(request.headers.get('x-if-match'))
+            if failure=='forbidden':return httpx.Response(403)
+            if failure=='persistent':return httpx.Response(503)
+            if len(attempts)==1:
+                if failure in ('after','after_read_failure'):fake.handle(request)
+                if failure=='competing':fake.objects['isolated-test/'+STATE_KEY]=b'other writer'
+                if failure=='timeout':raise httpx.ReadTimeout('fixture')
+                return httpx.Response(503)
+        return fake.handle(request)
+    store=BlobFileStore(token=base.token,prefix=base.prefix,transport=httpx.MockTransport(handle))
+    if failure=='competing':
+        with pytest.raises(WriteConflict):store.compare_and_swap(STATE_KEY,b'new',etag)
+        assert base.read(STATE_KEY)==b'other writer'
+    elif failure in ('persistent','forbidden'):
+        with pytest.raises(OSError):store.compare_and_swap(STATE_KEY,b'new',etag)
+        assert base.read(STATE_KEY)==b'old'
+        assert len(attempts)==(3 if failure=='persistent' else 1)
+    else:
+        store.compare_and_swap(STATE_KEY,b'new',etag)
+        assert base.read(STATE_KEY)==b'new'
+        assert len(attempts)==(1 if failure=='after' else 2)
+    assert all(value==etag for value in attempts)
